@@ -209,6 +209,9 @@ KNOWN_CONTEXT_WINDOWS = {
     # --- Nvidia ---
     'nemotron': 131072,
 
+    # --- Tencent ---
+    'hy3': 262144,
+
     # --- Yi ---
     'yi-large': 32768,
     'yi-1.5': 16384,
