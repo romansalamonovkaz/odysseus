@@ -185,6 +185,11 @@ KNOWN_CONTEXT_WINDOWS = {
     'qwen2.5': 131072,
     'qwen2': 32768,
     'qwq': 32768,
+    # Hyphenated ids (e.g. 'qwen/qwen-2.5-72b-instruct', 'qwen/qwen-2-vl-72b-instruct')
+    # don't contain 'qwen2.5'/'qwen2' as a substring — same truncation bug as hy3.
+    'qwen-2.5': 131072,
+    'qwen-2-vl': 32768,
+    'qwen-mt-plus': 16384,
 
     # --- Cohere ---
     'command-r-plus': 128000,
