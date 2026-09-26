@@ -135,22 +135,17 @@ export function handleUIControl(uiData) {
       // the 12s active-poll.
       var rsid = uiData.research_session_id || uiData.session_id;
       if (rsid) {
-        import('./research/jobs.js').then(function(mod) {
+        // Same specifier as research/panel.js so this is the panel's (initialised)
+        // module instance, not a second copy with no API base.
+        import('./research/jobs.js?v=20260630researchthumb').then(function(mod) {
           var fn = mod.adoptSession || (mod.default && mod.default.adoptSession);
           if (fn) fn(rsid);
-          // The server posts the finished report into this chat as a message.
-          // Refresh the chat in place once the job is done (only if the user
-          // is still looking at the chat that asked for it).
-          var chatSid = sessionModule && sessionModule.getCurrentSessionId();
-          if (chatSid && mod.onJobDone) {
-            mod.onJobDone(rsid, function() {
-              setTimeout(function() {
-                if (sessionModule.getCurrentSessionId() === chatSid) {
-                  sessionModule.selectSession(chatSid, { keepSidebar: true, showLoading: false });
-                }
-              }, 1500);
-            });
-          }
+          // The server posts the finished report into this chat as a message;
+          // remember which chat asked, so it can be refreshed when the job ends
+          // (see the 'odysseus:research-posted' listener below).
+          var sm = window.sessionModule || sessionModule;
+          var chatSid = sm && sm.getCurrentSessionId();
+          if (chatSid && mod.linkResearchToChat) mod.linkResearchToChat(rsid, chatSid);
         }).catch(function(){});
         // The clickable "Open in Deep Research" link is now emitted by the
         // agent loop as a `#research-<id>` markdown anchor in the assistant's
@@ -310,5 +305,22 @@ const chatStream = {
   insertStreamDoneToast,
   notifyResearchComplete,
 };
+
+// Deep Research finished and the server posted the full report into the chat
+// that started it: re-read that chat if the user is looking at it. Fires even
+// when the page was reloaded mid-research (link kept in localStorage by jobs.js).
+window.addEventListener('odysseus:research-posted', function(e) {
+  var chatSid = e.detail && e.detail.chatSid;
+  if (!chatSid) return;
+  // app.js imports sessions.js with a ?v= suffix, i.e. a separate module
+  // instance from ours — use the app's instance (window.sessionModule), which
+  // owns the visible chat state.
+  var sm = window.sessionModule || sessionModule;
+  setTimeout(function() {
+    if (sm.getCurrentSessionId() === chatSid) {
+      sm.selectSession(chatSid, { keepSidebar: true, showLoading: false });
+    }
+  }, 1500);
+});
 
 export default chatStream;

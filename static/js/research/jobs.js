@@ -357,10 +357,17 @@ function _finishJob(job, status) {
       try { new Notification('Research Complete', { body: job.query.slice(0, 80) }); } catch {}
     }
     if (_onCompleteCb) _onCompleteCb(job);
-    const _doneCb = _jobDoneCbs.get(job.id);
-    if (_doneCb) {
-      _jobDoneCbs.delete(job.id);
-      try { _doneCb(job); } catch {}
+    // The server posts the finished report into the chat that asked for it.
+    // The research→chat link lives in localStorage so it survives a page
+    // reload (mobile browsers often kill background tabs mid-research).
+    let chatSid = null;
+    try {
+      chatSid = localStorage.getItem(RESEARCH_CHAT_KEY + job.id);
+      localStorage.removeItem(RESEARCH_CHAT_KEY + job.id);
+    } catch {}
+    if (chatSid) {
+      window.dispatchEvent(new CustomEvent('odysseus:research-posted',
+        { detail: { researchId: job.id, chatSid } }));
     }
   }
   _notify();
@@ -369,10 +376,10 @@ function _finishJob(job, status) {
 let _onCompleteCb = null;
 export function onComplete(cb) { _onCompleteCb = cb; }
 
-// One-shot per-job callbacks (job.id === research session id). The chat uses this
-// to refresh itself when the server has posted the finished report into it.
-const _jobDoneCbs = new Map();
-export function onJobDone(id, cb) { _jobDoneCbs.set(id, cb); }
+const RESEARCH_CHAT_KEY = 'odysseus-research-chat:';
+export function linkResearchToChat(researchId, chatSid) {
+  try { localStorage.setItem(RESEARCH_CHAT_KEY + researchId, chatSid); } catch {}
+}
 
 async function _fetchResult(job) {
   try {
