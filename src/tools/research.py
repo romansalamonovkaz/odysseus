@@ -92,7 +92,8 @@ async def do_manage_research(content: str, owner: Optional[str] = None) -> Dict:
     return {"output": f"Research library ({len(items)} item{'s' if len(items) != 1 else ''}):\n{rows}", "exit_code": 0}
 
 
-async def do_trigger_research(content: str, owner: Optional[str] = None) -> Dict:
+async def do_trigger_research(content: str, owner: Optional[str] = None,
+                              session_id: Optional[str] = None) -> Dict:
     """Start a live deep-research job that appears in the Deep Research
     sidebar. Hits /api/research/start (the same path the sidebar's
     'Research' button uses) so the session is discoverable + streamable
@@ -129,6 +130,9 @@ async def do_trigger_research(content: str, owner: Optional[str] = None) -> Dict
         payload["category"] = args["category"]
     if args.get("search_provider"):
         payload["search_provider"] = args["search_provider"]
+    if session_id:
+        # Lets /api/research/start post the finished report back into this chat.
+        payload["chat_session_id"] = session_id
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{_INTERNAL_BASE}/api/research/start",
@@ -140,7 +144,11 @@ async def do_trigger_research(content: str, owner: Optional[str] = None) -> Dict
         return {
             "output": (
                 f"Deep research started: [{topic}](#research-{sid}). "
-                "Click to open the Deep Research sidebar and watch progress / read the report."
+                "Progress is visible in the Deep Research sidebar. "
+                + ("When it finishes, the FULL report is posted into this chat automatically — "
+                   "tell the user that, and do NOT promise to summarize it later or repeat it yourself."
+                   if session_id else
+                   "Click to open the Deep Research sidebar to read the report.")
             ),
             "session_id": sid,
             "anchor": f"[{topic}](#research-{sid})",

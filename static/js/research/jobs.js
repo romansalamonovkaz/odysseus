@@ -357,12 +357,22 @@ function _finishJob(job, status) {
       try { new Notification('Research Complete', { body: job.query.slice(0, 80) }); } catch {}
     }
     if (_onCompleteCb) _onCompleteCb(job);
+    const _doneCb = _jobDoneCbs.get(job.id);
+    if (_doneCb) {
+      _jobDoneCbs.delete(job.id);
+      try { _doneCb(job); } catch {}
+    }
   }
   _notify();
 }
 
 let _onCompleteCb = null;
 export function onComplete(cb) { _onCompleteCb = cb; }
+
+// One-shot per-job callbacks (job.id === research session id). The chat uses this
+// to refresh itself when the server has posted the finished report into it.
+const _jobDoneCbs = new Map();
+export function onJobDone(id, cb) { _jobDoneCbs.set(id, cb); }
 
 async function _fetchResult(job) {
   try {

@@ -206,6 +206,41 @@ def _resolve_endpoint_runtime(ep, owner=None, model: Optional[str] = None):
     return build_chat_url(base), ep_model, build_headers(api_key, base)
 
 
+def _make_chat_delivery(session_manager, chat_sid: str, user: str):
+    """on_complete callback: post the FULL finished report into the chat that started it,
+    exactly as the Deep Research panel shows it (not a summary)."""
+    def _deliver(rid, result, sources, findings):
+        if not (result or "").strip():
+            return
+        try:
+            from core.models import ChatMessage
+            from routes.chat_helpers import clean_thinking_for_save
+            s = session_manager.get_session(chat_sid)
+        except KeyError:
+            logger.warning(f"Chat session {chat_sid} is gone; research {rid} not posted to chat")
+            return
+        except Exception as e:
+            logger.error(f"Research→chat delivery setup failed for {chat_sid}: {e}")
+            return
+        owner = getattr(s, "owner", None)
+        if owner and user and owner != user:
+            logger.warning(f"Refusing to post research {rid} into a chat owned by someone else")
+            return
+        try:
+            md = {"research": True, "research_session_id": rid, "model": s.model}
+            if sources:
+                md["research_sources"] = sources
+            if findings:
+                md["research_findings"] = findings
+            clean, md = clean_thinking_for_save(result, md)
+            s.add_message(ChatMessage("assistant", clean, metadata=md))
+            session_manager.save_sessions()
+            logger.info(f"Research {rid} posted to chat {chat_sid} ({len(clean)} chars)")
+        except Exception as e:
+            logger.error(f"Failed to post research {rid} into chat {chat_sid}: {e}")
+    return _deliver
+
+
 def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
     router = APIRouter(tags=["research"])
 
@@ -488,6 +523,9 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         extraction_timeout: Optional[int] = Field(default=None, ge=15, le=3600)
         extraction_concurrency: Optional[int] = Field(default=None, ge=1, le=12)
         category: Optional[str] = None
+        # Chat session that asked for this research (set by the trigger_research
+        # tool). When present, the finished report is posted back into it.
+        chat_session_id: Optional[str] = Field(default=None, max_length=128)
 
     @router.post("/api/research/start")
     async def research_start(body: ResearchStartRequest, request: Request):
@@ -560,6 +598,10 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
 
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
+        on_complete = None
+        if (body.chat_session_id and session_manager is not None
+                and _SESSION_ID_RE.match(body.chat_session_id)):
+            on_complete = _make_chat_delivery(session_manager, body.chat_session_id, user)
         research_handler.start_research(
             session_id=session_id,
             query=body.query,
@@ -567,6 +609,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             llm_model=ep_model,
             max_time=body.max_time,
             llm_headers=ep_headers,
+            on_complete=on_complete,
             max_rounds=effective_max_rounds,
             search_provider=body.search_provider or None,
             category=body.category or None,

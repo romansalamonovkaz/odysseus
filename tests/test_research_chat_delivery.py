@@ -1,0 +1,95 @@
+"""Finished Deep Research reports are posted, in full, into the chat that asked for them."""
+
+import pytest
+
+from routes.research.research_routes import _make_chat_delivery
+
+
+class _Sess:
+    def __init__(self, owner="alice", model="m1"):
+        self.owner, self.model, self.messages = owner, model, []
+
+    def add_message(self, msg):
+        self.messages.append(msg)
+
+
+class _SM:
+    def __init__(self, sess=None):
+        self.sess, self.saved = sess, 0
+
+    def get_session(self, sid):
+        if self.sess is None:
+            raise KeyError(sid)
+        return self.sess
+
+    def save_sessions(self):
+        self.saved += 1
+
+
+REPORT = "# Report\n\n" + "full body paragraph. " * 200
+
+
+def test_posts_full_report_with_sources():
+    s = _Sess()
+    sm = _SM(s)
+    _make_chat_delivery(sm, "chat-1", "alice")("rp-1", REPORT, [{"url": "https://a.example"}], [])
+    assert len(s.messages) == 1
+    msg = s.messages[0]
+    assert msg.role == "assistant" and msg.content == REPORT.strip() or REPORT.strip() in msg.content
+    assert len(msg.content) >= len(REPORT.strip()) - 5  # a copy, not a summary
+    assert msg.metadata["research"] is True and msg.metadata["research_session_id"] == "rp-1"
+    assert msg.metadata["research_sources"] == [{"url": "https://a.example"}]
+    assert sm.saved == 1
+
+
+def test_empty_result_posts_nothing():
+    s = _Sess()
+    _make_chat_delivery(_SM(s), "chat-1", "alice")("rp-1", "   ", [], [])
+    assert s.messages == []
+
+
+def test_other_users_chat_is_refused():
+    s = _Sess(owner="bob")
+    sm = _SM(s)
+    _make_chat_delivery(sm, "chat-1", "alice")("rp-1", REPORT, [], [])
+    assert s.messages == [] and sm.saved == 0
+
+
+def test_missing_chat_session_does_not_raise():
+    _make_chat_delivery(_SM(None), "gone", "alice")("rp-1", REPORT, [], [])
+
+
+def test_auth_disabled_empty_user_still_delivers():
+    s = _Sess(owner="")
+    _make_chat_delivery(_SM(s), "chat-1", "")("rp-1", REPORT, [], [])
+    assert len(s.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_trigger_research_sends_chat_session_id(monkeypatch):
+    import httpx
+    from src.tools.research import do_trigger_research
+    seen = {}
+
+    class _R:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"session_id": "rp-9"}
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            seen["json"] = json
+            return _R()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _C)
+    out = await do_trigger_research('{"topic": "t"}', owner="alice", session_id="chat-7")
+    assert seen["json"]["chat_session_id"] == "chat-7"
+    assert "FULL report is posted into this chat" in out["output"]
+
+    out = await do_trigger_research('{"topic": "t"}', owner="alice")
+    assert "chat_session_id" not in seen["json"] and "sidebar" in out["output"]

@@ -138,6 +138,19 @@ export function handleUIControl(uiData) {
         import('./research/jobs.js').then(function(mod) {
           var fn = mod.adoptSession || (mod.default && mod.default.adoptSession);
           if (fn) fn(rsid);
+          // The server posts the finished report into this chat as a message.
+          // Refresh the chat in place once the job is done (only if the user
+          // is still looking at the chat that asked for it).
+          var chatSid = sessionModule && sessionModule.getCurrentSessionId();
+          if (chatSid && mod.onJobDone) {
+            mod.onJobDone(rsid, function() {
+              setTimeout(function() {
+                if (sessionModule.getCurrentSessionId() === chatSid) {
+                  sessionModule.selectSession(chatSid, { keepSidebar: true, showLoading: false });
+                }
+              }, 1500);
+            });
+          }
         }).catch(function(){});
         // The clickable "Open in Deep Research" link is now emitted by the
         // agent loop as a `#research-<id>` markdown anchor in the assistant's
