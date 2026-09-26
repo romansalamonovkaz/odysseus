@@ -2072,6 +2072,12 @@ async def llm_call_async(
             payload["think"] = False
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        # Novita reasoning models (deepseek-v4.x) can burn the whole max_tokens
+        # budget thinking on long structured prompts (deep-research query gen),
+        # leaving content empty so we fall back to raw reasoning text. These
+        # non-streamed calls want the answer, not the thinking.
+        if "api.novita.ai" in target_url:
+            payload["enable_thinking"] = False
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
 
