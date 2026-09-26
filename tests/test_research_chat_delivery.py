@@ -120,3 +120,53 @@ def test_verbatim_skipped_for_other_owner_missing_chat_or_duplicate():
     s2 = _Sess()
     s2.history = [_Msg("user", "тема")]
     assert _with_verbatim_user_request(_SM(s2), "c", "alice", "тема") == "тема"
+
+
+def _capture_email(monkeypatch):
+    import threading, httpx
+    sent = []
+
+    class _R:
+        status_code = 200
+
+    monkeypatch.setattr(httpx, "post", lambda url, json=None, headers=None, timeout=None: sent.append((url, json, headers)) or _R())
+
+    class _SyncThread:
+        def __init__(self, target=None, name=None, daemon=None):
+            self._t = target
+
+        def start(self):
+            self._t()
+
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    return sent
+
+
+def test_report_is_emailed_when_configured(monkeypatch):
+    sent = _capture_email(monkeypatch)
+    monkeypatch.setenv("RESEARCH_EMAIL_TO", "me@example.com")
+    monkeypatch.setenv("MAIL_RELAY_URL", "https://relay.example/mail-relay")
+    monkeypatch.setenv("MAIL_RELAY_SECRET", "s3")
+    s = _Sess()
+    topic = "БАДы Добровольская\n\nДословный запрос пользователя: «...»"
+    _make_chat_delivery(_SM(s), "chat-1", "alice", topic)("rp-1", "# Отчёт\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+                                                          [{"url": "https://src.example", "title": "Src"}], [])
+    assert len(sent) == 1
+    url, payload, headers = sent[0]
+    assert url == "https://relay.example/mail-relay" and headers == {"x-relay-secret": "s3"}
+    assert payload["to"] == "me@example.com"
+    assert payload["subject"] == "Deep Research: БАДы Добровольская"
+    assert "<table>" in payload["body"] and 'href="https://src.example"' in payload["body"]
+
+
+def test_no_email_without_config_or_when_not_posted(monkeypatch):
+    sent = _capture_email(monkeypatch)
+    for k in ("RESEARCH_EMAIL_TO", "MAIL_RELAY_URL", "MAIL_RELAY_SECRET"):
+        monkeypatch.delenv(k, raising=False)
+    _make_chat_delivery(_SM(_Sess()), "chat-1", "alice", "t")("rp-1", REPORT, [], [])
+    assert sent == []
+    monkeypatch.setenv("RESEARCH_EMAIL_TO", "me@example.com")
+    monkeypatch.setenv("MAIL_RELAY_URL", "https://relay.example/mail-relay")
+    monkeypatch.setenv("MAIL_RELAY_SECRET", "s3")
+    _make_chat_delivery(_SM(_Sess(owner="bob")), "chat-1", "alice", "t")("rp-1", REPORT, [], [])
+    assert sent == []  # another user's chat: not posted, not emailed

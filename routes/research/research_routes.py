@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import logging
 import re
 import uuid
@@ -230,7 +231,7 @@ def _with_verbatim_user_request(session_manager, chat_sid: str, user: str, topic
             f"писать и искать строго в этом написании, не исправлять): «{last_user}»")
 
 
-def _make_chat_delivery(session_manager, chat_sid: str, user: str):
+def _make_chat_delivery(session_manager, chat_sid: str, user: str, topic: str = ""):
     """on_complete callback: post the FULL finished report into the chat that started it,
     exactly as the Deep Research panel shows it (not a summary)."""
     def _deliver(rid, result, sources, findings):
@@ -262,7 +263,51 @@ def _make_chat_delivery(session_manager, chat_sid: str, user: str):
             logger.info(f"Research {rid} posted to chat {chat_sid} ({len(clean)} chars)")
         except Exception as e:
             logger.error(f"Failed to post research {rid} into chat {chat_sid}: {e}")
+            return
+        _email_research_copy(rid, topic, clean, sources)
     return _deliver
+
+
+def _email_research_copy(rid: str, topic: str, report: str, sources) -> None:
+    """Email a copy of a chat-delivered research report, in a background thread.
+
+    Timeweb blocks outbound SMTP, so mail goes through the whisper_bot HTTPS
+    relay on Hetzner (POST /mail-relay, shared secret). Off unless all three
+    env vars are set: RESEARCH_EMAIL_TO, MAIL_RELAY_URL, MAIL_RELAY_SECRET.
+    """
+    to = (os.environ.get("RESEARCH_EMAIL_TO") or "").strip()
+    url = (os.environ.get("MAIL_RELAY_URL") or "").strip()
+    secret = (os.environ.get("MAIL_RELAY_SECRET") or "").strip()
+    if not (to and url and secret):
+        return
+    import html as _html
+    try:
+        import markdown as _md
+        body_html = _md.markdown(report, extensions=["tables", "fenced_code"])
+    except Exception:
+        body_html = f"<pre>{_html.escape(report)}</pre>"
+    links = "".join(
+        f'<li><a href="{_html.escape(s.get("url", ""))}">{_html.escape(s.get("title") or s.get("url", ""))}</a></li>'
+        for s in (sources or [])[:60] if isinstance(s, dict) and s.get("url")
+    )
+    if links:
+        body_html += f"<h2>Источники</h2><ol>{links}</ol>"
+    title = " ".join((topic or "").split("\n\n")[0].split())[:120] or rid
+    payload = {"to": to, "subject": f"Deep Research: {title}", "body": body_html}
+
+    def _send():
+        import httpx
+        try:
+            r = httpx.post(url, json=payload, headers={"x-relay-secret": secret}, timeout=60)
+            if r.status_code == 200:
+                logger.info(f"Research {rid} emailed ({len(report)} chars)")
+            else:
+                logger.error(f"Research {rid} email relay returned HTTP {r.status_code}")
+        except Exception as e:
+            logger.error(f"Research {rid} email failed: {e}")
+
+    import threading
+    threading.Thread(target=_send, name=f"research-email-{rid}", daemon=True).start()
 
 
 def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
@@ -626,7 +671,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         query = body.query
         if (body.chat_session_id and session_manager is not None
                 and _SESSION_ID_RE.match(body.chat_session_id)):
-            on_complete = _make_chat_delivery(session_manager, body.chat_session_id, user)
+            on_complete = _make_chat_delivery(session_manager, body.chat_session_id, user, body.query)
             query = _with_verbatim_user_request(session_manager, body.chat_session_id, user, query)
         research_handler.start_research(
             session_id=session_id,
