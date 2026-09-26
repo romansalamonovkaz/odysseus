@@ -161,7 +161,7 @@ def test_report_is_emailed_when_configured(monkeypatch):
 
 def test_no_email_without_config_or_when_not_posted(monkeypatch):
     sent = _capture_email(monkeypatch)
-    for k in ("RESEARCH_EMAIL_TO", "MAIL_RELAY_URL", "MAIL_RELAY_SECRET"):
+    for k in ("RESEARCH_EMAIL_TO", "MAIL_RELAY_URL", "MAIL_RELAY_SECRET", "TG_RELAY_URL"):
         monkeypatch.delenv(k, raising=False)
     _make_chat_delivery(_SM(_Sess()), "chat-1", "alice", "t")("rp-1", REPORT, [], [])
     assert sent == []

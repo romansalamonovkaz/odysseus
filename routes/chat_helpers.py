@@ -1123,6 +1123,11 @@ def save_assistant_response(
         _append_incognito_message(session_id, "assistant", _content, md)
         return None
     sess.add_message(ChatMessage("assistant", _content, metadata=md))
+    try:
+        from src.mail_copy import email_chat_reply
+        email_chat_reply(sess, session_id, _content)
+    except Exception as e:
+        logger.warning(f"Chat reply email copy skipped: {e}")
 
     from core.database import update_session_last_accessed
     update_session_last_accessed(session_id)
