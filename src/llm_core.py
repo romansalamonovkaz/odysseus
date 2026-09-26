@@ -855,7 +855,7 @@ def _detect_provider(url: str) -> str:
     """
     if _is_ollama_native_url(url):
         return "ollama"
-    if _host_match(url, "anthropic.com"):
+    if _host_match(url, "anthropic.com", "anthropic-proxy.whisper-reiki.ru"):
         return "anthropic"
     if _host_match(url, "opencode.ai/zen/go"):
         return "opencode-go"
@@ -997,7 +997,7 @@ def _provider_label(url: str) -> str:
     """Human-friendly provider name for error messages."""
     if not url:
         return "provider"
-    if _host_match(url, "anthropic.com"): return "Anthropic"
+    if _host_match(url, "anthropic.com", "anthropic-proxy.whisper-reiki.ru"): return "Anthropic"
     if _host_match(url, "ollama.com"): return "Ollama Cloud"
     if _host_match(url, "x.ai"): return "xAI"
     if _host_match(url, "openai.com"): return "OpenAI"
