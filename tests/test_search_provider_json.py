@@ -65,6 +65,7 @@ def test_exa_malformed_json_returns_empty(monkeypatch):
 
 
 def test_exa_maps_results_and_sends_key(monkeypatch):
+    monkeypatch.delenv("EXA_BASE_URL", raising=False)
     monkeypatch.setenv("EXA_API_KEY", "secret")
     seen = {}
 
@@ -95,3 +96,17 @@ def test_exa_maps_results_and_sends_key(monkeypatch):
 def test_exa_without_key_returns_empty(monkeypatch):
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     assert providers.exa_search("q") == []
+
+
+def test_exa_base_url_override(monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    monkeypatch.setenv("EXA_BASE_URL", "https://relay.example:4443/")
+    seen = {}
+
+    def _post(url, **kw):
+        seen["url"] = url
+        return _BadJSONResponse()
+
+    monkeypatch.setattr(providers.httpx, "post", _post)
+    providers.exa_search("q")
+    assert seen["url"] == "https://relay.example:4443/search"

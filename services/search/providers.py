@@ -607,7 +607,8 @@ def exa_search(query: str, count: Optional[int] = None, time_filter: Optional[st
 
     try:
         response = httpx.post(
-            "https://api.exa.ai/search",
+            # EXA_BASE_URL lets a host whose IP Exa's Cloudflare blocks go through a relay.
+            (os.environ.get("EXA_BASE_URL") or "https://api.exa.ai").rstrip("/") + "/search",
             json=payload,
             headers={"x-api-key": api_key, "Content-Type": "application/json"},
             timeout=REQUEST_TIMEOUT,
