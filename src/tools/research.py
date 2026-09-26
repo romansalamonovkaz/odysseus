@@ -102,7 +102,18 @@ async def do_trigger_research(content: str, owner: Optional[str] = None) -> Dict
     try:
         args = _parse_tool_args(content)
     except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
+        # Fenced-block models (e.g. tencent/hy3) sometimes emit broken JSON
+        # (unescaped quotes, trailing text) or a bare topic string. Salvage
+        # the topic instead of failing the whole research request.
+        import re
+        raw = content.strip() if isinstance(content, str) else ""
+        m = re.search(r'"(?:topic|query)"\s*:\s*"(.+?)"\s*(?:,\s*"[a-z_]+"\s*:|\}\s*$)', raw, re.S)
+        if m:
+            args = {"topic": m.group(1)}
+        elif raw and not raw.startswith("{"):
+            args = {"topic": raw}
+        else:
+            return {"error": "Invalid JSON arguments", "exit_code": 1}
     topic = args.get("topic", "") or args.get("query", "")
     if not topic:
         return {"error": "topic (or query) is required", "exit_code": 1}
