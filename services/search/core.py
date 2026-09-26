@@ -28,6 +28,7 @@ from .providers import (
     duckduckgo_search,
     google_pse_search,
     tavily_search,
+    exa_search,
     serper_search,
     _get_search_settings,
     _get_provider_key,
@@ -105,6 +106,8 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
         return google_pse_search(query, count, time_filter)
     elif provider_name == "tavily":
         return tavily_search(query, count, time_filter)
+    elif provider_name == "exa":
+        return exa_search(query, count, time_filter)
     elif provider_name == "serper":
         return serper_search(query, count, time_filter)
     return []

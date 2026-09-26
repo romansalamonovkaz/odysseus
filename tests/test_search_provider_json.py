@@ -57,3 +57,41 @@ def test_google_pse_malformed_json_returns_empty():
 def test_brave_malformed_json_returns_empty():
     # Already correct on main — guards against regressing the reference behaviour.
     assert providers.brave_search("hello") == []
+
+
+def test_exa_malformed_json_returns_empty(monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "k")
+    assert providers.exa_search("hello") == []
+
+
+def test_exa_maps_results_and_sends_key(monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "secret")
+    seen = {}
+
+    class _OK:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": [
+                {"title": "T", "url": "https://a.example", "text": "body", "publishedDate": "2026-01-01"},
+                {"title": "no url"},
+            ]}
+
+    def _post(url, **kw):
+        seen.update(url=url, headers=kw["headers"], json=kw["json"])
+        return _OK()
+
+    monkeypatch.setattr(providers.httpx, "post", _post)
+    out = providers.exa_search("q", count=5, time_filter="week")
+    assert out == [{"title": "T", "url": "https://a.example", "snippet": "body", "age": "2026-01-01"}]
+    assert seen["url"] == "https://api.exa.ai/search"
+    assert seen["headers"]["x-api-key"] == "secret"
+    assert seen["json"]["numResults"] == 5 and "startPublishedDate" in seen["json"]
+
+
+def test_exa_without_key_returns_empty(monkeypatch):
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    assert providers.exa_search("q") == []

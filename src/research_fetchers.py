@@ -1,4 +1,4 @@
-"""Page fetching for Deep Research: crawl4ai -> Firecrawl -> built-in fetcher.
+"""Page fetching for Deep Research: crawl4ai -> CRW -> Firecrawl -> Jina Reader -> built-in fetcher.
 
 The built-in fetcher (``src.search.fetch_webpage_content``) is plain httpx +
 BeautifulSoup: it cannot run JavaScript, so SPA / JS-heavy pages come back
@@ -13,6 +13,11 @@ Configuration (all optional):
   settings ``research_fetcher``: "auto" (default) or "builtin" to disable.
   env ``CRAWL4AI_URL``      — base URL of a crawl4ai server (overrides MCP row).
   env ``FIRECRAWL_API_KEY`` — Firecrawl key (overrides MCP row).
+  env ``CRW_URL``           — base URL of a self-hosted CRW server (fastcrw/crw);
+                              ``CRW_API_KEY`` is sent as a Bearer token if set.
+  env ``JINA_API_KEY``      — optional Jina Reader key (higher rate limits).
+                              Jina Reader also works keyless, so it is tried
+                              unless ``JINA_READER=off``.
 """
 
 import json
@@ -121,6 +126,48 @@ def _fetch_firecrawl(api_key: str, url: str, timeout: int) -> Optional[Dict]:
     return page
 
 
+def _fetch_crw(base: str, url: str, timeout: int) -> Optional[Dict]:
+    """Self-hosted CRW (fastcrw/crw, Firecrawl-style): POST /v1/scrape -> data.markdown."""
+    headers = {}
+    key = (os.environ.get("CRW_API_KEY") or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    resp = httpx.post(f"{base.rstrip('/')}/v1/scrape", headers=headers,
+                      json={"url": url, "formats": ["markdown"]}, timeout=timeout)
+    resp.raise_for_status()
+    body = resp.json()
+    data = body.get("data") or {}
+    content = (data.get("markdown") or "").strip()
+    if body.get("success") is False or len(content) < MIN_CONTENT_CHARS:
+        return None
+    meta = data.get("metadata") or {}
+    page = _page(url, content, title=meta.get("title") or "", via="crw")
+    page["og_image"] = meta.get("ogImage") or ""
+    return page
+
+
+def _fetch_jina(url: str, timeout: int) -> Optional[Dict]:
+    """Jina Reader (r.jina.ai): URL -> markdown. Works keyless; a key raises limits."""
+    headers = {"Accept": "text/plain", "X-Return-Format": "markdown"}
+    key = (os.environ.get("JINA_API_KEY") or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    resp = httpx.get(f"https://r.jina.ai/{url}", headers=headers,
+                     timeout=timeout, follow_redirects=True)
+    resp.raise_for_status()
+    text = resp.text.strip()
+    title = ""
+    if text.startswith("Title:"):
+        first, _, rest = text.partition("\n")
+        title = first[len("Title:"):].strip()
+        marker = "Markdown Content:"
+        idx = rest.find(marker)
+        text = rest[idx + len(marker):].strip() if idx != -1 else rest.strip()
+    if len(text) < MIN_CONTENT_CHARS:
+        return None
+    return _page(url, text, title=title, via="jina")
+
+
 def fetch_page_for_research(url: str, timeout: int = 10) -> Dict:
     """Fetch ``url`` for Deep Research. Same result shape as fetch_webpage_content."""
     from src.search import fetch_webpage_content
@@ -140,12 +187,24 @@ def fetch_page_for_research(url: str, timeout: int = 10) -> Dict:
     # Rendering a JS page takes longer than a plain GET.
     render_timeout = max(timeout, 45)
 
-    for name, base in (("crawl4ai", crawl4ai_url), ("firecrawl", firecrawl_key)):
+    # Order: self-hosted first (free), metered Firecrawl next, Jina as last resort.
+    crw_url = (os.environ.get("CRW_URL") or "").strip() or None
+    backends = [("crawl4ai", crawl4ai_url), ("crw", crw_url), ("firecrawl", firecrawl_key)]
+    if (os.environ.get("JINA_READER") or "on").strip().lower() != "off":
+        backends.append(("jina", "on"))
+
+    for name, base in backends:
         if not base:
             continue
         try:
-            fetch = _fetch_crawl4ai if name == "crawl4ai" else _fetch_firecrawl
-            page = fetch(base, url, render_timeout)
+            if name == "jina":
+                page = _fetch_jina(url, render_timeout)
+            elif name == "crawl4ai":
+                page = _fetch_crawl4ai(base, url, render_timeout)
+            elif name == "crw":
+                page = _fetch_crw(base, url, render_timeout)
+            else:
+                page = _fetch_firecrawl(base, url, render_timeout)
             if page:
                 logger.info(f"Research fetch via {name}: {url} ({len(page['content'])} chars)")
                 return page
