@@ -1,4 +1,4 @@
-"""Deep Research page fetch chain: crawl4ai -> CRW -> Firecrawl -> Jina -> built-in."""
+"""Deep Research page fetch chain: CRW -> crawl4ai -> Firecrawl -> Jina -> built-in."""
 
 import src.research_fetchers as rf
 import src.search as search_mod
@@ -72,14 +72,24 @@ def test_crawl4ai_mention_enables_web_intent():
     assert "web" in str(intent).lower()
 
 
-def test_crw_between_crawl4ai_and_firecrawl(monkeypatch):
+def test_crw_is_tried_first(monkeypatch):
     calls = _setup(monkeypatch, crw="http://crw:3000")
     monkeypatch.setattr(rf, "_fetch_crawl4ai", lambda b, u, t: calls.append("c4a") or None)
     monkeypatch.setattr(rf, "_fetch_crw", lambda b, u, t: calls.append("crw") or rf._page(u, LONG, via="crw"))
     monkeypatch.setattr(rf, "_fetch_firecrawl", lambda k, u, t: calls.append("fc") or None)
     page = rf.fetch_page_for_research("https://example.com/a")
     assert page["fetched_via"] == "crw"
-    assert calls == ["c4a", "crw"]
+    assert calls == ["crw"]
+
+
+def test_thin_crw_falls_through_to_crawl4ai(monkeypatch):
+    calls = _setup(monkeypatch, crw="http://crw:3000")
+    monkeypatch.setattr(rf, "_fetch_crw", lambda b, u, t: calls.append("crw") or None)
+    monkeypatch.setattr(rf, "_fetch_crawl4ai", lambda b, u, t: calls.append("c4a") or rf._page(u, LONG, via="crawl4ai"))
+    monkeypatch.setattr(rf, "_fetch_firecrawl", lambda k, u, t: calls.append("fc") or None)
+    page = rf.fetch_page_for_research("https://example.com/spa")
+    assert page["fetched_via"] == "crawl4ai"
+    assert calls == ["crw", "c4a"]
 
 
 def test_crw_skipped_without_url(monkeypatch):

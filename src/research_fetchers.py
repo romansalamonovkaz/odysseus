@@ -1,4 +1,4 @@
-"""Page fetching for Deep Research: crawl4ai -> CRW -> Firecrawl -> Jina Reader -> built-in fetcher.
+"""Page fetching for Deep Research: CRW -> crawl4ai -> Firecrawl -> Jina Reader -> built-in fetcher.
 
 The built-in fetcher (``src.search.fetch_webpage_content``) is plain httpx +
 BeautifulSoup: it cannot run JavaScript, so SPA / JS-heavy pages come back
@@ -187,9 +187,10 @@ def fetch_page_for_research(url: str, timeout: int = 10) -> Dict:
     # Rendering a JS page takes longer than a plain GET.
     render_timeout = max(timeout, 45)
 
-    # Order: self-hosted first (free), metered Firecrawl next, Jina as last resort.
+    # Order: CRW first (tiny, fast, static pages), crawl4ai (real browser, JS) picks up the
+    # pages CRW returns thin, then metered Firecrawl, Jina as the last resort.
     crw_url = (os.environ.get("CRW_URL") or "").strip() or None
-    backends = [("crawl4ai", crawl4ai_url), ("crw", crw_url), ("firecrawl", firecrawl_key)]
+    backends = [("crw", crw_url), ("crawl4ai", crawl4ai_url), ("firecrawl", firecrawl_key)]
     if (os.environ.get("JINA_READER") or "on").strip().lower() != "off":
         backends.append(("jina", "on"))
 
