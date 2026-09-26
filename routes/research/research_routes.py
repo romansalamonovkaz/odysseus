@@ -206,6 +206,30 @@ def _resolve_endpoint_runtime(ep, owner=None, model: Optional[str] = None):
     return build_chat_url(base), ep_model, build_headers(api_key, base)
 
 
+def _with_verbatim_user_request(session_manager, chat_sid: str, user: str, topic: str) -> str:
+    """Append the user's own last chat message to an agent-written research topic.
+
+    The chat model paraphrases the request into the trigger_research topic and
+    "corrects" unfamiliar proper names (Добровольская -> Доброланская), so the
+    research then searches for a person who doesn't exist. Giving the researcher
+    the verbatim request lets it use the names exactly as the user typed them.
+    """
+    try:
+        s = session_manager.get_session(chat_sid)
+    except Exception:
+        return topic
+    owner = getattr(s, "owner", None)
+    if owner and user and owner != user:
+        return topic
+    last_user = next((m.content for m in reversed(s.history or [])
+                      if m.role == "user" and (m.content or "").strip()), "")
+    last_user = last_user.strip()[:1500]
+    if not last_user or last_user in topic:
+        return topic
+    return (f"{topic}\n\nДословный запрос пользователя (имена, фамилии и названия "
+            f"писать и искать строго в этом написании, не исправлять): «{last_user}»")
+
+
 def _make_chat_delivery(session_manager, chat_sid: str, user: str):
     """on_complete callback: post the FULL finished report into the chat that started it,
     exactly as the Deep Research panel shows it (not a summary)."""
@@ -599,12 +623,14 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
         on_complete = None
+        query = body.query
         if (body.chat_session_id and session_manager is not None
                 and _SESSION_ID_RE.match(body.chat_session_id)):
             on_complete = _make_chat_delivery(session_manager, body.chat_session_id, user)
+            query = _with_verbatim_user_request(session_manager, body.chat_session_id, user, query)
         research_handler.start_research(
             session_id=session_id,
-            query=body.query,
+            query=query,
             llm_endpoint=ep_url,
             llm_model=ep_model,
             max_time=body.max_time,

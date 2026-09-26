@@ -93,3 +93,30 @@ async def test_trigger_research_sends_chat_session_id(monkeypatch):
 
     out = await do_trigger_research('{"topic": "t"}', owner="alice")
     assert "chat_session_id" not in seen["json"] and "sidebar" in out["output"]
+
+
+class _Msg:
+    def __init__(self, role, content):
+        self.role, self.content = role, content
+
+
+def test_verbatim_user_request_is_appended():
+    from routes.research.research_routes import _with_verbatim_user_request
+    s = _Sess()
+    s.history = [_Msg("user", "проведи исследование про олесю добровольскую"),
+                 _Msg("assistant", "```trigger_research ...```")]
+    out = _with_verbatim_user_request(_SM(s), "chat-1", "alice", "БАДы Олеся Доброланская")
+    assert out.startswith("БАДы Олеся Доброланская")
+    assert "«проведи исследование про олесю добровольскую»" in out
+    assert "не исправлять" in out
+
+
+def test_verbatim_skipped_for_other_owner_missing_chat_or_duplicate():
+    from routes.research.research_routes import _with_verbatim_user_request
+    s = _Sess(owner="bob")
+    s.history = [_Msg("user", "x y z")]
+    assert _with_verbatim_user_request(_SM(s), "c", "alice", "t") == "t"
+    assert _with_verbatim_user_request(_SM(None), "c", "alice", "t") == "t"
+    s2 = _Sess()
+    s2.history = [_Msg("user", "тема")]
+    assert _with_verbatim_user_request(_SM(s2), "c", "alice", "тема") == "тема"
