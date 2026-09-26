@@ -613,8 +613,8 @@ class DeepResearcher:
         self._emit(phase="reading", url=url, title=display,
                    total_sources=len(self.urls_fetched))
         try:
-            from src.search import fetch_webpage_content
-            page = await asyncio.to_thread(fetch_webpage_content, url, 10)
+            from src.research_fetchers import fetch_page_for_research
+            page = await asyncio.to_thread(fetch_page_for_research, url, 10)
         except Exception as e:
             logger.warning(f"Failed to fetch {url}: {e}")
             return None

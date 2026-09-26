@@ -363,7 +363,17 @@ def _get_public_url(url: str, headers: dict, timeout: int, max_redirects: int = 
 try:
     from pdfminer.high_level import extract_text as pdf_extract_text
 except ImportError:
-    pdf_extract_text = None  # type: ignore
+    try:
+        # pypdf is a hard requirement, so PDFs stay readable even if the
+        # optional pdfminer.six is missing from the image.
+        from pypdf import PdfReader
+
+        def pdf_extract_text(stream):  # type: ignore
+            return "\n\n".join(
+                (page.extract_text() or "") for page in PdfReader(stream).pages
+            )
+    except ImportError:
+        pdf_extract_text = None  # type: ignore
 
 
 # ----------------------------------------------------------------------
@@ -563,7 +573,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
                 + "; retry with a larger budget if it fits under the hard cap",
             )
         if pdf_extract_text is None:
-            logger.error("pdfminer.six is not installed; cannot extract PDF text.")
+            logger.error("No PDF library (pdfminer.six or pypdf) installed; cannot extract PDF text.")
             pdf_text = ""
         else:
             try:

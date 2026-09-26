@@ -97,6 +97,7 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         # tools attached — even though the user named the tool outright.
         # Catching the bare tool name is language-independent and cheap.
         ("web", "explicit tool name mention", r"\bfirecrawl\b"),
+        ("web", "explicit tool name mention", r"\bcrawl4ai\b"),
 
         # Deep research jobs, not quick conceptual mentions of research.
         ("web", "explicit web search request", rf"{_PLEASE}(?:do|run|use|perform|make)\s+(?:a\s+)?(?:web\s+search|search\s+the\s+web)\b.+"),
