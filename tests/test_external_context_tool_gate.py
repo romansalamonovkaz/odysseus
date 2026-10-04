@@ -71,6 +71,10 @@ def _patch_agent_loop(monkeypatch, round_responses, executed):
                     "exit_code": 0,
                 },
             )
+        if block.tool_type == "web_fetch":
+            # Fork 2026-10-04: opening a page after a search is allowed while no private
+            # data was read in the run (see test_fork_fetch_after_search.py).
+            return ("web_fetch", {"output": "page text", "exit_code": 0})
         raise AssertionError(f"high-impact tool reached executor: {block.tool_type}")
 
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
@@ -338,7 +342,11 @@ def test_external_context_keeps_explicit_low_impact_tools_available(tool_name):
 
 
 def test_external_context_blocks_model_controlled_web_fetch_egress():
-    context = ToolRunSecurityContext(external_untrusted_context_seen=True)
+    # Fork 2026-10-04: web_fetch after external context is gated only once the run
+    # has read private data (otherwise there is nothing to exfiltrate).
+    assert ToolRunSecurityContext(external_untrusted_context_seen=True).decision_for(
+        "web_fetch", '{"url":"https://ex.example/page"}').allowed is True
+    context = ToolRunSecurityContext(external_untrusted_context_seen=True, private_context_seen=True)
 
     assert ToolEffect.NETWORK_EGRESS in capabilities_for_tool("web_fetch").effects
     decision = context.decision_for(
@@ -853,7 +861,9 @@ def test_fake_weak_model_search_then_bash_same_batch_is_blocked(monkeypatch):
     assert any(event.get("type") == "ask_user" for event in events)
 
 
-def test_search_then_model_controlled_fetch_same_batch_is_blocked(monkeypatch):
+def test_search_then_model_controlled_fetch_same_batch_is_allowed_without_private_data(monkeypatch):
+    """Fork 2026-10-04: «search → open the page» needs no approval while the run read no
+    private data; the blocked case with private data is covered by the unit test above."""
     executed = []
     agent_loop = _patch_agent_loop(
         monkeypatch,
@@ -877,8 +887,8 @@ def test_search_then_model_controlled_fetch_same_batch_is_blocked(monkeypatch):
         )
     )
 
-    assert executed == ["web_search"]
-    assert any(
+    assert executed == ["web_search", "web_fetch"]
+    assert not any(
         event.get("type") == "tool_output"
         and event.get("tool") == "web_fetch"
         and event.get("ask_user", {}).get("kind") == "tool_approval"

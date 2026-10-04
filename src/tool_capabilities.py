@@ -565,6 +565,10 @@ POST_EXTERNAL_BLOCKED_EFFECTS = frozenset(
 )
 
 
+# Fork: tools that may open a web page after a search while no private data was read.
+FETCH_WITHOUT_PRIVATE_CONTEXT = frozenset({"web_fetch"})
+
+
 @dataclass(frozen=True)
 class ToolGateDecision:
     allowed: bool
@@ -618,6 +622,10 @@ class ToolRunSecurityContext:
 
     external_untrusted_context_seen: bool = False
     external_sources: list[str] = field(default_factory=list)
+    # Fork (2026-10-04): set once this run executed any tool that reads private data
+    # (email, calendar, documents, memory…). Until then there is nothing private to
+    # exfiltrate, so opening a found web page (web_fetch) is not gated after a search.
+    private_context_seen: bool = False
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     # Task-scope approval sets this for the resumed in-memory run. Chat-scope
     # approval is projected from the server-owned session history marker below.
@@ -671,6 +679,12 @@ class ToolRunSecurityContext:
         blocked_effects = capabilities.effects & POST_EXTERNAL_BLOCKED_EFFECTS
         if capabilities.known and not blocked_effects:
             return ToolGateDecision(True)
+        if (capabilities.known and tool_name in FETCH_WITHOUT_PRIVATE_CONTEXT
+                and blocked_effects <= {ToolEffect.NETWORK_EGRESS}
+                and not self.private_context_seen):
+            # Fork: research flow «search → open the page» stays fluent; exfiltration
+            # needs private data in context, and none was read in this run.
+            return ToolGateDecision(True)
         effects = ", ".join(sorted(effect.value for effect in blocked_effects))
         if not capabilities.known:
             effects = "unknown/high-impact"
@@ -689,6 +703,9 @@ class ToolRunSecurityContext:
         result: Any,
         content: Any = None,
     ) -> None:
+        if ToolEffect.READ_PRIVATE in capabilities_for_action(tool_name, content).effects \
+                or not capabilities_for_action(tool_name, content).known:
+            self.private_context_seen = True
         if not tool_result_should_arm_gate(tool_name, result, content):
             return
         self.external_untrusted_context_seen = True
