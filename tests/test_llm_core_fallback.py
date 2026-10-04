@@ -420,7 +420,9 @@ def test_candidate_request_factory_builds_each_attempt_before_streaming(monkeypa
 
     assert calls == [
         ("primary", [{"role": "user", "content": "prompt for primary"}], ["primary"]),
-        ("backup", [{"role": "user", "content": "prompt for backup"}], None),
+        # fork: fallbacks also get the final-answer rule appended (see _messages_for_fallback)
+        ("backup", [{"role": "user", "content": "prompt for backup"},
+                    {"role": "system", "content": llm_core._FALLBACK_REPLY_RULE}], None),
     ]
     assert any('"delta": "backup"' in chunk for chunk in chunks)
 
