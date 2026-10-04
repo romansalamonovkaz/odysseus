@@ -266,3 +266,33 @@ def test_single_candidate_error_passes_through_unchanged(monkeypatch):
 
     out = asyncio.run(run())
     assert out == ['event: error\ndata: {"status": 503, "text": "down"}\n\n']
+
+
+def test_fallback_candidates_get_clean_messages_and_reply_rule(monkeypatch):
+    """2026-10-04: HF router 400'd on DeepSeek's reasoning_content in history, and the
+    last fallback answered «Done.» + English reasoning. Fallbacks get the history
+    without provider-only fields plus a rule to give the final answer in the user's language."""
+    seen = {}
+
+    async def fake_stream(url, model, messages, **kw):
+        seen[model] = messages
+        if model == "primary":
+            yield 'event: error\ndata: {"status": 503, "text": "Cannot reach api.novita.ai"}\n\n'
+            return
+        yield 'data: {"delta": "ответ"}\n\n'
+        yield "data: [DONE]\n\n"
+    monkeypatch.setattr(llm_core, "stream_llm", fake_stream)
+    history = [{"role": "user", "content": "вопрос"},
+               {"role": "assistant", "content": "", "reasoning_content": "thinking…", "tool_calls": []}]
+
+    async def run():
+        return [c async for c in llm_core.stream_llm_with_fallback(
+            [("u1", "primary", {}), ("u2", "backup", {})], history)]
+
+    asyncio.run(run())
+    assert seen["primary"] is history                      # primary gets the original, untouched
+    assert "reasoning_content" in history[1]
+    backup = seen["backup"]
+    assert all("reasoning_content" not in m for m in backup)
+    assert backup[1]["tool_calls"] == []                    # other fields kept
+    assert backup[-1]["role"] == "system" and "итоговый ответ" in backup[-1]["content"]

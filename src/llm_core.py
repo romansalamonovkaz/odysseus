@@ -2981,6 +2981,33 @@ def _combined_fallback_error(primary_model: str, primary_err: str, last_model: s
     return f'event: error\ndata: {json.dumps({"status": status or 502, "text": text})}\n\n'
 
 
+# Provider-specific fields a fallback provider may reject: DeepSeek keeps its
+# reasoning in assistant turns as `reasoning_content`; HF router answers 400
+# "property 'messages.N.assistant.reasoning_content' is unsupported".
+_PROVIDER_ONLY_MESSAGE_KEYS = ("reasoning_content", "reasoning", "reasoning_details")
+
+_FALLBACK_REPLY_RULE = (
+    "Ты отвечаешь вместо основной модели. Дай пользователю полный итоговый ответ "
+    "на его языке (обычно русском), опираясь на уже найденное в этом разговоре. "
+    "Не пиши рассуждения, план действий или короткие отписки вроде «Done» — только сам ответ."
+)
+
+
+def _messages_for_fallback(messages):
+    """Copy of the conversation that any OpenAI-compatible fallback accepts.
+
+    2026-10-04: after Novita dropped mid-agent-loop, the HF Qwen fallback 400'd on
+    DeepSeek's `reasoning_content`, and the last fallback (gpt-oss-120b) replied
+    «Done.» with English reasoning only — the user saw no answer at all."""
+    out = []
+    for m in messages or []:
+        if isinstance(m, dict) and any(k in m for k in _PROVIDER_ONLY_MESSAGE_KEYS):
+            m = {k: v for k, v in m.items() if k not in _PROVIDER_ONLY_MESSAGE_KEYS}
+        out.append(m)
+    out.append({"role": "system", "content": _FALLBACK_REPLY_RULE})
+    return out
+
+
 async def stream_llm_with_fallback(candidates, messages, **kwargs):
     """Wrap stream_llm with an ordered fallback chain.
 
@@ -3008,7 +3035,8 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         emitted = False
         retried = False
         pending_metadata = []
-        async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
+        cand_messages = messages if i == 0 else _messages_for_fallback(messages)
+        async for chunk in stream_llm(url, model, cand_messages, headers=headers, **kwargs):
             if chunk.startswith("event: error"):
                 if not emitted and not is_last:
                     # Pre-content failure with fallbacks left — swallow and
