@@ -28,3 +28,20 @@ def test_side_effects_still_gated_after_search():
     ctx = ToolRunSecurityContext()
     _after_search(ctx)
     assert not ctx.decision_for("send_email", {"to": "a@b.c", "body": "x"}).allowed
+
+
+def test_new_document_allowed_after_search_without_private_reads():
+    ctx = ToolRunSecurityContext()
+    _after_search(ctx)
+    assert ctx.decision_for("create_document", "Аналитик из розницы в офис\nтекст").allowed
+
+
+def test_new_document_gated_after_private_read_and_edits_stay_gated():
+    ctx = ToolRunSecurityContext()
+    ctx.observe_tool_result("list_emails", {"emails": [{"subject": "x"}], "exit_code": 0}, {})
+    _after_search(ctx)
+    assert not ctx.decision_for("create_document", "t\nx").allowed
+    fresh = ToolRunSecurityContext()
+    _after_search(fresh)
+    assert not fresh.decision_for("update_document", "x").allowed
+    assert not fresh.decision_for("manage_documents", {"action": "delete"}).allowed

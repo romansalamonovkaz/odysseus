@@ -565,8 +565,14 @@ POST_EXTERNAL_BLOCKED_EFFECTS = frozenset(
 )
 
 
-# Fork: tools that may open a web page after a search while no private data was read.
-FETCH_WITHOUT_PRIVATE_CONTEXT = frozenset({"web_fetch"})
+# Fork: tools allowed after external context while no private data was read in the run,
+# with the only gated effect each may have. web_fetch: open a found page (2026-10-04);
+# create_document: write a NEW document in the user's library — it never edits or deletes
+# an existing one (owner 2026-10-05). Everything else stays gated as upstream.
+FETCH_WITHOUT_PRIVATE_CONTEXT = {
+    "web_fetch": frozenset({ToolEffect.NETWORK_EGRESS}),
+    "create_document": frozenset({ToolEffect.WRITE_PRIVATE}),
+}
 
 
 @dataclass(frozen=True)
@@ -680,7 +686,7 @@ class ToolRunSecurityContext:
         if capabilities.known and not blocked_effects:
             return ToolGateDecision(True)
         if (capabilities.known and tool_name in FETCH_WITHOUT_PRIVATE_CONTEXT
-                and blocked_effects <= {ToolEffect.NETWORK_EGRESS}
+                and blocked_effects <= FETCH_WITHOUT_PRIVATE_CONTEXT[tool_name]
                 and not self.private_context_seen):
             # Fork: research flow «search → open the page» stays fluent; exfiltration
             # needs private data in context, and none was read in this run.

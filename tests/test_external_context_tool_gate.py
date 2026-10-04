@@ -897,6 +897,10 @@ def test_search_then_model_controlled_fetch_same_batch_is_allowed_without_privat
 
 
 def test_search_then_document_same_batch_has_no_editor_side_effect(monkeypatch):
+    # Fork 2026-10-05: create_document is allowed after a search when no private data was read;
+    # these tests keep checking the gate mechanics for a GATED create_document.
+    from src import tool_capabilities as _tc
+    monkeypatch.delitem(_tc.FETCH_WITHOUT_PRIVATE_CONTEXT, "create_document")
     executed = []
     agent_loop = _patch_agent_loop(
         monkeypatch,
@@ -931,6 +935,10 @@ def test_search_then_document_same_batch_has_no_editor_side_effect(monkeypatch):
 
 
 def test_initial_external_context_blocks_document_before_editor_side_effect(monkeypatch):
+    # Fork 2026-10-05: create_document is allowed after a search when no private data was read;
+    # these tests keep checking the gate mechanics for a GATED create_document.
+    from src import tool_capabilities as _tc
+    monkeypatch.delitem(_tc.FETCH_WITHOUT_PRIVATE_CONTEXT, "create_document")
     from src.prompt_security import untrusted_context_message
 
     executed = []
@@ -964,6 +972,10 @@ def test_initial_external_context_blocks_document_before_editor_side_effect(monk
 
 
 def test_native_argument_deltas_do_not_mutate_editor_before_gate(monkeypatch):
+    # Fork 2026-10-05: create_document is allowed after a search when no private data was read;
+    # these tests keep checking the gate mechanics for a GATED create_document.
+    from src import tool_capabilities as _tc
+    monkeypatch.delitem(_tc.FETCH_WITHOUT_PRIVATE_CONTEXT, "create_document")
     from src.prompt_security import untrusted_context_message
 
     import src.agent_loop as agent_loop
