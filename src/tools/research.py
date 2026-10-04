@@ -147,7 +147,11 @@ async def do_trigger_research(content: str, owner: Optional[str] = None,
             resp = await client.post(f"{_INTERNAL_BASE}/api/research/start",
                                      json=payload, headers=_internal_headers(owner))
         if resp.status_code >= 400:
-            return {"error": f"research/start returned HTTP {resp.status_code}: {resp.text[:200]}", "exit_code": 1}
+            return {
+                "error": f"research/start returned HTTP {resp.status_code}: {resp.text[:200]}",
+                "exit_code": 1,
+                "untrusted_content": True,
+            }
         data = resp.json()
         sid = data.get("session_id", "?")
         return {
