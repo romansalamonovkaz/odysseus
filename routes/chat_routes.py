@@ -749,6 +749,21 @@ def _set_user_time_from_request(request: Request) -> None:
         pass
 
 
+
+def _copy_streamed_docs(docs: list, session_id: str) -> None:
+    """Fork 2026-10-05: send documents the agent wrote in the side window to the owner's
+    Telegram (same relay as chat-reply copies). Fire-and-forget; never breaks the stream."""
+    try:
+        from src.mail_copy import send_telegram_copy
+        for d in docs:
+            body = (d.get("content") or "").strip()
+            if not body:
+                continue
+            title = (d.get("title") or "").strip() or "Документ"
+            send_telegram_copy(f"📄 Odysseus — документ «{title}»\n\n{body}", tag=f"doc-{str(session_id)[:8]}")
+    except Exception as e:
+        logger.warning(f"Document Telegram copy skipped: {e}")
+
 def setup_chat_routes(
     session_manager,
     chat_handler,
@@ -1852,6 +1867,7 @@ def setup_chat_routes(
             full_response = ""
             thinking_response = ""
             last_metrics = None
+            _streamed_docs: list = []   # fork 2026-10-05: documents the agent wrote → TG copy
 
             # Foreground Chat and Agent requests share one explicit owner-aware
             # policy. Strict mode is the default; legacy values are unrelated.
@@ -2239,6 +2255,9 @@ def setup_chat_routes(
                                 _stream_set(session, status="error")
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                                if _streamed_docs and not incognito:
+                                    _copy_streamed_docs(_streamed_docs, session)
+                                    _streamed_docs.clear()
                                 yield f'data: {json.dumps({"type": "chat_terminal", "data": _terminal_metrics})}\n\n'
                             yield chunk
                         elif chunk.startswith("event: "):
@@ -2306,6 +2325,9 @@ def setup_chat_routes(
                                 )
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                                if _streamed_docs and not incognito:
+                                    _copy_streamed_docs(_streamed_docs, session)
+                                    _streamed_docs.clear()
                                 run_post_response_tasks(
                                     sess, session_manager, session, message, full_response,
                                     _metrics_to_save, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
@@ -2461,6 +2483,10 @@ def setup_chat_routes(
                                         )
                                     elif data.get("type") == "tool_start":
                                         _agent_tool_calls += 1
+                                    elif data.get("type") == "doc_stream_open":
+                                        _streamed_docs.append({"title": data.get("title") or "", "content": ""})
+                                    elif data.get("type") == "doc_stream_delta" and _streamed_docs:
+                                        _streamed_docs[-1]["content"] += data.get("content") or ""
                                     yield chunk
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
@@ -2531,6 +2557,9 @@ def setup_chat_routes(
                                         _stream_set(session, status="error")
                                         if _saved_id:
                                             yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                                        if _streamed_docs and not incognito:
+                                            _copy_streamed_docs(_streamed_docs, session)
+                                            _streamed_docs.clear()
                                     yield chunk
                                 elif data.get("type") == "metrics":
                                     last_metrics = data.get("data", {})
@@ -2574,6 +2603,9 @@ def setup_chat_routes(
                                 )
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                                if _streamed_docs and not incognito:
+                                    _copy_streamed_docs(_streamed_docs, session)
+                                    _streamed_docs.clear()
                                 run_post_response_tasks(
                                     sess, session_manager, session, message, _response_to_save,
                                     _metrics_to_save, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
