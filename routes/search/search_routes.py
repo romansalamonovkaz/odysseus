@@ -1,5 +1,6 @@
 """Search routes — /api/search/config GET, /api/search POST."""
 
+import asyncio
 import logging
 from typing import Dict, Any
 
@@ -57,7 +58,11 @@ def setup_search_routes(config) -> APIRouter:
         if time_filter is not None:
             time_filter = str(time_filter).strip() or None
         try:
-            context, sources = comprehensive_web_search(
+            # comprehensive_web_search is synchronous (search + page fetches,
+            # 3-15 s); calling it inline froze the event loop — every chat
+            # stream, research job and MCP call — for the whole search.
+            context, sources = await asyncio.to_thread(
+                comprehensive_web_search,
                 query, return_sources=True, time_filter=time_filter,
             )
             return {"context": context, "sources": sources}
