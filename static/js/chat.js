@@ -4766,7 +4766,18 @@ import { loadPanel } from './panels.js';
       // never attach the recovery reader to the wrong conversation.
       if (sessionId && sessionModule.getCurrentSessionId() !== sessionId) return;
       const resumed = await resumeStream(sessionId, holder || null);
-      if (!resumed && holder && holder.isConnected) {
+      if (resumed) return;
+      // No run to reattach to. Usually the detached run already FINISHED and saved
+      // its answer while this tab was asleep/offline (seen 2026-10-07: answer saved
+      // 12:42, tab woke 13:01 and painted «Connection lost» over it). Reload the
+      // saved messages instead of overwriting the bubble with an error.
+      try {
+        if (sessionModule.getCurrentSessionId() === sessionId) {
+          await sessionModule.selectSession(sessionId, { keepSidebar: true, showLoading: false });
+          return;
+        }
+      } catch (e) { /* fall through to the explicit notice */ }
+      if (holder && holder.isConnected) {
         const body = holder.querySelector('.body');
         if (body) typewriterInto(body, 'Connection lost. The existing run could not be resumed.');
       }
