@@ -35,6 +35,7 @@ import {
   inheritModelRouteState,
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
+import { isUndeliveredSend, questionReachedServer } from './chatUndelivered.js';
 import { loadPanel } from './panels.js';
 
   // Agent/Chat mode is a single global localStorage toggle, shared by every
@@ -1518,6 +1519,7 @@ import { loadPanel } from './panels.js';
 
     // Declare accumulated outside try block so it's accessible in catch
     let accumulated = '';
+    let _postHeadersSeen = false; // set once POST /api/chat_stream answered with headers
     // Are we currently inside an unclosed <think> block? Toggled per think/answer
     // cycle so a multi-round agent response (one reasoning phase PER round) wraps each
     // round's reasoning in its own <think>…</think> instead of leaking rounds 2+ as text.
@@ -2119,6 +2121,7 @@ import { loadPanel } from './panels.js';
         signal: abortCtrl.signal
       });
       _sendPerf.mark('chat_stream_headers');
+      _postHeadersSeen = true;
       _sendPerf.report('headers_received');
       
       if (!res.ok) {
@@ -4367,6 +4370,23 @@ import { loadPanel } from './panels.js';
       _removeThinkingSpinner();
       document.querySelectorAll('.agent-thread.streaming').forEach(t => t.classList.remove('streaming'));
 
+      // The POST never got headers and nothing streamed: the question may never
+      // have reached the server, so «interrupted» would be misleading and an
+      // auto-recover nudge would answer a question the server never saw.
+      if (isUndeliveredSend({
+        headersSeen: _postHeadersSeen,
+        accumulated,
+        text: msg,
+        isBackground: _isBgCatch,
+        aborted: !!(abortCtrl && abortCtrl.signal.aborted),
+        abortReason: abortCtrl ? (abortCtrl._reason || '') : '',
+        recoverableError: isRecoverableStreamError(err),
+      })) {
+        _renderUndeliveredBubble(holder, msg, streamSessionId);
+        if (currentAbort === abortCtrl) currentAbort = null;
+        return;
+      }
+
       if (_isBgCatch) {
         // Error happened while backgrounded — update map, don't touch DOM
         console.error('Background stream error:', err);
@@ -4878,6 +4898,56 @@ import { loadPanel } from './panels.js';
   /** Show a "Cancelled by user" record in `holder` and persist an empty
    *  assistant placeholder server-side so the turn survives a refresh.
    *  Called from both abort paths when no tokens had streamed yet. */
+  /** «Not delivered» bubble with a checked «send again» (see chatUndelivered.js). */
+  function _renderUndeliveredBubble(holder, text, sid) {
+    if (!holder) return;
+    holder.dataset.raw = '';
+    holder.style.display = '';
+    const body = holder.querySelector('.body');
+    if (!body) return;
+    body.innerHTML = '';
+    const note = document.createElement('div');
+    note.className = 'undelivered-note';
+    note.style.cssText = 'color: var(--color-error); font-style: italic; padding: 4px 0;';
+    note.textContent = 'Вопрос не дошёл до сервера — браузер оборвал отправку. Текст сохранён в поле ввода.';
+    const btn = document.createElement('button');
+    btn.className = 'continue-btn resend-btn';
+    btn.textContent = '↻ Отправить снова';
+    body.appendChild(note);
+    body.appendChild(btn);
+    const input = uiModule.el('message');
+    if (input && !input.value.trim()) input.value = text;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      let reached;
+      try {
+        reached = await questionReachedServer(fetch, API_BASE, sid, text);
+      } catch (e) {
+        console.warn('[undelivered] server check failed:', e);
+        note.textContent = 'Сервер сейчас не отвечает. Текст в поле ввода — отправьте его, когда связь вернётся.';
+        btn.disabled = false;
+        return;
+      }
+      if (reached) {
+        // It did arrive (still running or already saved) — show the server's copy.
+        await sessionModule.selectSession(sid, { showLoading: false });
+        return;
+      }
+      if (sessionModule.getCurrentSessionId() !== sid) {
+        await sessionModule.selectSession(sid, { showLoading: false });
+      } else {
+        holder.remove();
+        _hideUserBubble = true; // the original question bubble is still on screen
+      }
+      const msgInput = uiModule.el('message');
+      if (!msgInput) return;
+      msgInput.value = text;
+      const sb = document.querySelector('.send-btn');
+      if (sb) sb.click();
+    });
+    uiModule.scrollHistory();
+  }
+
   function _renderCancelledBubble(holder) {
     if (!holder) return;
     if (holder.dataset.cancelledRendered === '1') return;
