@@ -16,8 +16,10 @@ _DEFAULT_FALLBACK_ENTRY_RESOLVER = resolve_fallback_entries
 
 FOREGROUND_FALLBACK_ENABLED_KEY = "foreground_fallback_enabled"
 FOREGROUND_FALLBACK_LIST_KEY = "foreground_model_fallbacks"
+# Fork 2026-10-14: 402 (provider balance empty, e.g. polza.ai) is an availability failure of that
+# route, not of the request — the same model through the next paid intermediary should answer.
 FOREGROUND_AVAILABILITY_STATUSES: FrozenSet[int] = frozenset({
-    408, 425, 429, 500, 502, 503, 504, 507, 508, 529,
+    402, 408, 425, 429, 500, 502, 503, 504, 507, 508, 529,
 })
 MAX_FOREGROUND_FALLBACKS = 10
 

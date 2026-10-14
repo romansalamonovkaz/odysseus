@@ -1551,3 +1551,29 @@ def test_fallback_candidates_get_clean_messages_and_reply_rule(monkeypatch):
     assert all("reasoning_content" not in m for m in backup)
     assert backup[1]["tool_calls"] == []                    # other fields kept
     assert backup[-1]["role"] == "system" and "итоговый ответ" in backup[-1]["content"]
+
+
+def test_foreground_policy_falls_back_on_402_payment_required(monkeypatch):
+    """Fork 2026-10-14: an empty provider balance (polza.ai 402) must hand the turn to the next
+    route of the same model, under the strict foreground policy statuses."""
+    from src.foreground_model_routing import FOREGROUND_AVAILABILITY_STATUSES
+
+    def per_model(model):
+        if model == "primary":
+            return ['event: error\ndata: {"status": 402, "error": "Insufficient balance"}\n\n']
+        return ['data: {"delta": "hello"}\n\n', "data: [DONE]\n\n"]
+    chunks = _run_fallback(monkeypatch, per_model, fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES)
+    assert any('"hello"' in c for c in chunks), chunks
+    assert not any(c.startswith("event: error") for c in chunks), chunks
+
+
+def test_foreground_policy_still_strict_on_401(monkeypatch):
+    from src.foreground_model_routing import FOREGROUND_AVAILABILITY_STATUSES
+
+    def per_model(model):
+        if model == "primary":
+            return ['event: error\ndata: {"status": 401, "error": "invalid key"}\n\n']
+        return ['data: {"delta": "hello"}\n\n', "data: [DONE]\n\n"]
+    chunks = _run_fallback(monkeypatch, per_model, fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES)
+    assert any(c.startswith("event: error") for c in chunks), chunks
+    assert not any('"hello"' in c for c in chunks), chunks
