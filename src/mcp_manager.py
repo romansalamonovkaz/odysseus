@@ -523,9 +523,12 @@ class McpManager:
         """Disconnect from all MCP servers."""
         # Pending retries / background connects of servers that never connected
         # are not in _sessions; cancel them too so none outlives shutdown.
-        for task in list(self._connect_tasks.values()):
-            if task is not None and not task.done():
-                task.cancel()
+        pending = [t for t in self._connect_tasks.values() if t is not None and not t.done()]
+        for task in pending:
+            task.cancel()
+        # Let a cancelled connect close its stack (and its npx child) first.
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         self._connect_tasks.clear()
         ids = list(self._sessions.keys())
         for sid in ids:
@@ -567,17 +570,25 @@ class McpManager:
             )
         except asyncio.TimeoutError:
             logger.warning("Timed out connecting to %s", srv.name)
-            self._connections[srv.id] = {
-                "status": "timeout",
-                "error": f"Timed out after 20 seconds",
-                "name": srv.name,
-            }
+            # A manual (re)connect may have succeeded while this attempt hung.
+            if not self._has_live_session(srv.id):
+                self._connections[srv.id] = {
+                    "status": "timeout",
+                    "error": f"Timed out after 20 seconds",
+                    "name": srv.name,
+                }
 
-        if srv.transport == "stdio" and ok is not True:
+        if srv.transport == "stdio" and ok is not True and not self._has_live_session(srv.id):
             # Never awaited: startup must not wait for retries.
             self._connect_tasks[srv.id] = asyncio.create_task(
                 self._retry_connect(srv.id, srv.name)
             )
+
+    def _has_live_session(self, server_id: str) -> bool:
+        return (
+            server_id in self._sessions
+            or self._connections.get(server_id, {}).get("status") == "connected"
+        )
 
     def _cancel_pending_retry(self, server_id: str) -> None:
         task = self._connect_tasks.get(server_id)
@@ -596,7 +607,7 @@ class McpManager:
         try:
             for attempt, (pause, timeout) in enumerate(_MCP_RETRY_SCHEDULE, start=1):
                 await asyncio.sleep(pause)
-                if self._connections.get(server_id, {}).get("status") == "connected":
+                if self._has_live_session(server_id):
                     return True
                 db = SessionLocal()
                 try:

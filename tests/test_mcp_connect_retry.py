@@ -54,25 +54,37 @@ def fast_retries(monkeypatch):
 
 
 def _install(monkeypatch, manager, rows, outcomes):
-    """connect_server fake: pops the next outcome (True/False/"hang") per call."""
+    """Fake the transports (not connect_server), so the real connect_server
+    wiring — including its cancel of a pending retry — is exercised. Each
+    connect attempt pops the next outcome: True / False / "hang"."""
     calls = []
     monkeypatch.setattr(mm, "SessionLocal", lambda: _FakeDB(rows))
 
-    async def fake_connect_server(server_id, name, transport, command=None, args=None, env=None, url=None):
-        if transport == "stdio":
-            manager._cancel_pending_retry(server_id)
+    async def attempt(server_id, name):
         calls.append(server_id)
         outcome = outcomes.pop(0) if outcomes else False
         if outcome == "hang":
             await asyncio.sleep(3600)
         if outcome is True:
+            session = object()
+            manager._sessions[server_id] = session
             manager._connections[server_id] = {"status": "connected", "name": name}
-            manager._sessions[server_id] = object()
-        else:
-            manager._connections[server_id] = {"status": "error", "error": "boom", "name": name}
-        return outcome is True
+            return True
+        manager._connections[server_id] = {"status": "error", "error": "boom", "name": name}
+        return False
 
-    monkeypatch.setattr(manager, "connect_server", fake_connect_server)
+    async def fake_stdio(server_id, name, command, args, env):
+        return await attempt(server_id, name)
+
+    async def fake_sse(server_id, name, url):
+        return await attempt(server_id, name)
+
+    async def fake_http(server_id, name, url, wait=8.0):
+        return await attempt(server_id, name)
+
+    monkeypatch.setattr(manager, "_connect_stdio", fake_stdio)
+    monkeypatch.setattr(manager, "_connect_sse", fake_sse)
+    monkeypatch.setattr(manager, "_start_http_connect", fake_http)
     return calls
 
 
@@ -245,3 +257,46 @@ async def test_connect_server_stores_and_logs_the_real_cause(monkeypatch, caplog
     assert ok is False
     assert "ConnectionError: npm exited 1" in manager._connections["fc"]["error"]
     assert "ConnectionError: npm exited 1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_manual_reconnect_during_hung_startup_connect_makes_no_retry(monkeypatch, fast_retries):
+    """Review r1: startup attempt hangs on npx, the user reconnects successfully,
+    then the startup attempt times out — it must neither overwrite "connected"
+    nor schedule a retry that would open a second session."""
+    real_wait_for = asyncio.wait_for
+
+    async def short_wait_for(awaitable, timeout):
+        return await real_wait_for(awaitable, timeout=min(timeout, 0.2))
+
+    monkeypatch.setattr(mm.asyncio, "wait_for", short_wait_for)
+    manager = mm.McpManager()
+    calls = _install(monkeypatch, manager, [_row()], ["hang", True, True])
+
+    startup = asyncio.create_task(manager.connect_all_enabled())
+    await asyncio.sleep(0.05)
+    assert await manager.connect_server("fc", "Firecrawl", "stdio", "npx", [], {}) is True
+    session_b = manager._sessions["fc"]
+    await startup
+    await asyncio.sleep(0.1)
+
+    assert calls == ["fc", "fc"]
+    assert manager._connections["fc"]["status"] == "connected"
+    assert manager._sessions["fc"] is session_b
+    assert "fc" not in manager._connect_tasks
+
+
+@pytest.mark.asyncio
+async def test_disconnect_all_waits_for_cancelled_connects(monkeypatch):
+    monkeypatch.setattr(mm, "_MCP_RETRY_SCHEDULE", ((0.01, 5.0), (0.01, 5.0)))
+    manager = mm.McpManager()
+    calls = _install(monkeypatch, manager, [_row()], [False, "hang"])
+
+    await manager.connect_all_enabled()
+    retry = manager._connect_tasks["fc"]
+    await asyncio.sleep(0.05)  # the retry is now inside its hung connect attempt
+    assert calls == ["fc", "fc"]
+    await manager.disconnect_all()
+
+    assert retry.done()
+    assert manager._connect_tasks == {}
