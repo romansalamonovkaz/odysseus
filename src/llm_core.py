@@ -2529,7 +2529,7 @@ async def llm_call_async(
                 if r.status_code in (429, 502, 503, 504) and attempt < max_retries:
                     await asyncio.sleep(LLMConfig.RETRY_DELAY)
                     continue
-                raise HTTPException(r.status_code, friendly)
+                raise HTTPException(_upstream_http_error_status(r.status_code, r.text), friendly)
             logger.info(f"LLM async call to {target_url} succeeded in {duration:.2f}s (attempt {attempt})")
             _clear_host_dead(target_url)
             data = r.json()
@@ -2856,7 +2856,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_chatgpt_subscription_error(r.status_code, raw)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": _upstream_http_error_status(r.status_code, raw), "text": friendly, "raw": raw[:500]})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -2977,7 +2977,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": _upstream_http_error_status(r.status_code, raw), "text": friendly, "raw": raw[:500]})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     if not line:
@@ -3078,7 +3078,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
-                    yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                    yield f'event: error\ndata: {json.dumps({"status": _upstream_http_error_status(r.status_code, raw), "text": friendly, "raw": raw[:500]})}\n\n'
                     return
                 async for line in r.aiter_lines():
                     # SSE allows "data:value" with no space after the colon
@@ -3264,7 +3264,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
                 friendly = _format_upstream_error(r.status_code, raw, target_url)
-                yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
+                yield f'event: error\ndata: {json.dumps({"status": _upstream_http_error_status(r.status_code, raw), "text": friendly, "raw": raw[:500]})}\n\n'
                 return
 
             async for line in r.aiter_lines():
@@ -3675,6 +3675,31 @@ def _is_balance_exhausted_text(error) -> bool:
         text = str(error or "")
     text = text.lower()
     return any(marker in text for marker in _BALANCE_EXHAUSTED_MARKERS)
+
+
+def _upstream_http_error_status(status_code: int, raw) -> int:
+    """HTTP status of a failed upstream response, with an empty balance reported as 402.
+
+    Fork 2026-10-24: a provider that answers a real HTTP 400/403 with a balance
+    message (polza.ai body ``{"error": "Недостаточно средств…", "status": 400}``)
+    is unavailable, not rejecting the request, so the next route should answer.
+    The body is JSON-decoded first: escaped Cyrillic never matches as raw text.
+    """
+
+    if status_code not in (400, 403):
+        return status_code
+    body = raw
+    if isinstance(raw, (str, bytes)):
+        try:
+            body = json.loads(raw)
+        except (ValueError, TypeError):
+            body = raw
+    candidates = [body]
+    if isinstance(body, dict):
+        candidates.append(body.get("error"))
+    if any(_is_balance_exhausted_text(c) for c in candidates if c):
+        return 402
+    return status_code
 
 
 def _provider_stream_error_status(error, *, default: int = 400) -> int:

@@ -1593,3 +1593,129 @@ def test_provider_empty_balance_is_payment_required(error):
 
 def test_provider_plain_bad_request_text_stays_400():
     assert llm_core._provider_stream_error_status("Неверный запрос: bad request") == 400
+
+
+_POLZA_EMPTY_BALANCE = (
+    "Недостаточно средств. Требуется: 1.00 ₽, доступно: 0.94 ₽ (баланс: 0.94 ₽, "
+    "зарезервировано: 0.00 ₽). Пожалуйста, пополните баланс."
+)
+
+
+@pytest.mark.parametrize("error, expected", [
+    ({"error": "Недостаточно средств"}, 402),
+    ({"status": 400, "error": "invalid_request", "message": "bad request"}, 400),
+    ({"code": "invalid_api_key", "message": "check your account balance page"}, 401),
+])
+def test_provider_balance_markers_scan_error_field_without_false_positives(error, expected):
+    assert llm_core._provider_stream_error_status(error) == expected
+
+
+def test_polza_empty_balance_in_200_stream_falls_back_to_next_route(monkeypatch):
+    """End to end: polza's in-stream balance event, as the adapter turns it into an
+    error chunk, must hand the turn to the same model on the next route."""
+    from src.foreground_model_routing import FOREGROUND_AVAILABILITY_STATUSES
+
+    polza_chunks = _run_provider_stream(
+        monkeypatch,
+        "https://polza.ai/api/v1/chat/completions",
+        ["data: " + json.dumps({"error": _POLZA_EMPTY_BALANCE, "status": 400})],
+    )
+    assert json.loads(polza_chunks[0].split("data: ", 1)[1])["status"] == 402
+
+    def per_model(model):
+        if model == "primary":
+            return polza_chunks
+        return ['data: {"delta": "hello"}\n\n', "data: [DONE]\n\n"]
+    chunks = _run_fallback(monkeypatch, per_model, fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES)
+    assert any('"hello"' in c for c in chunks), chunks
+    assert not any(c.startswith("event: error") for c in chunks), chunks
+
+
+class _HttpErrorResponse(_ProviderResponse):
+    def __init__(self, status_code, body):
+        super().__init__([])
+        self.status_code = status_code
+        self._body = body
+
+    async def aread(self):
+        return self._body.encode()
+
+
+class _HttpErrorClient:
+    def __init__(self, status_code, body):
+        self._resp = _HttpErrorResponse(status_code, body)
+
+    def stream(self, method, url, **kwargs):
+        resp = self._resp
+
+        class _Ctx:
+            async def __aenter__(self):
+                return resp
+
+            async def __aexit__(self, *args):
+                return False
+        return _Ctx()
+
+
+@pytest.mark.parametrize("url", [
+    "https://polza.ai/api/v1/chat/completions",
+    "http://localhost:11434/api/chat",
+    "https://api.anthropic.com/v1/messages",
+    "https://chatgpt.com/backend-api/codex/responses",
+])
+@pytest.mark.parametrize("http_status, body, expected", [
+    # json.dumps escapes the Cyrillic — the classifier must decode before matching.
+    (400, json.dumps({"error": _POLZA_EMPTY_BALANCE, "status": 400}), 402),
+    (403, json.dumps({"error": {"message": "Insufficient balance"}}), 402),
+    (400, json.dumps({"error": {"message": "bad request: unknown field"}}), 400),
+    (401, json.dumps({"error": _POLZA_EMPTY_BALANCE}), 401),
+])
+def test_http_error_status_with_balance_body_becomes_402(monkeypatch, url, http_status, body, expected):
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _HttpErrorClient(http_status, body))
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "_clear_host_dead", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+
+    async def run():
+        return [
+            chunk
+            async for chunk in llm_core._stream_llm_inner(
+                url,
+                "configured-model",
+                [{"role": "user", "content": "hi"}],
+                headers={"Authorization": "Bearer test"},
+            )
+        ]
+
+    chunks = asyncio.run(run())
+    errors = [c for c in chunks if c.startswith("event: error")]
+    assert errors, chunks
+    assert json.loads(errors[0].split("data: ", 1)[1])["status"] == expected
+
+
+@pytest.mark.parametrize("http_status, body, expected", [
+    (400, json.dumps({"error": _POLZA_EMPTY_BALANCE, "status": 400}), 402),
+    (400, json.dumps({"error": {"message": "bad request"}}), 400),
+])
+def test_non_stream_http_error_with_balance_body_raises_402(monkeypatch, http_status, body, expected):
+    class _Resp:
+        status_code = http_status
+        is_success = False
+        text = body
+        headers = {}
+
+        def json(self):
+            return json.loads(body)
+
+    async def fake_post(*a, **k):
+        return _Resp()
+    monkeypatch.setattr(llm_core, "httpx_post_kimi_aware_async", fake_post)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *args, **kwargs: None)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(llm_core.llm_call_async(
+            "https://polza.ai/api/v1/chat/completions",
+            "deepseek/deepseek-v4.1-flash",
+            [{"role": "user", "content": "balance-test-unique"}],
+            max_retries=1,
+        ))
+    assert exc.value.status_code == expected
