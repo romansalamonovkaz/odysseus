@@ -9,6 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY docker/build-realesrgan-wheels.sh /usr/local/bin/build-realesrgan-wheels.sh
 RUN bash /usr/local/bin/build-realesrgan-wheels.sh /wheels
 
+# Fork 2026-10-24: Node 22 LTS from the official image instead of Debian's nodejs
+# (v20). firecrawl-mcp needs node>=22, and the browser-module tests use the
+# global `navigator` that Node only has from v21. Same Debian trixie/glibc as
+# python:3.14-slim, so the binary runs as is.
+FROM node:22.23.4-trixie-slim AS node22
+
 FROM python:3.14-slim
 
 # System deps. tmux is required by Cookbook for background downloads/serves.
@@ -16,7 +22,7 @@ FROM python:3.14-slim
 # downloads, and serves from Docker installs.
 # git/cmake are required when Cookbook builds llama.cpp on first llama.cpp
 # launch inside Docker.
-# nodejs/npm provide npx for the built-in Browser MCP server.
+# Node/npm/npx (for the built-in Browser MCP server) come from the node22 stage below.
 # chromium provides the actual browser binary used by that MCP server.
 # gosu lets the entrypoint drop privileges cleanly so signals still reach
 # uvicorn directly (no extra shell layer like `su`/`sudo` would add).
@@ -25,8 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     curl \
     git \
-    nodejs \
-    npm \
     chromium \
     tmux \
     openssh-client \
@@ -51,6 +55,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # absent the import can block or raise, so keeping it image-only avoids
 # regressing pip/venv installs on hosts without libmagic. Debian always has the
 # lib here, so the import is instant and detection actually works.
+
+# Fork 2026-10-24: Node 22 + npm/npx/corepack from the node22 stage. COPY follows
+# the top-level symlinks, so the launchers are recreated. The npm cache lives on
+# the persistent /app/data bind mount: npx MCP servers (Firecrawl) are otherwise
+# downloaded again on every container recreate, under a 20 s connect limit.
+# npmrc covers subprocesses started with a minimal env; the ENV covers
+# builtin_mcp's cache lookup (it reads $npm_config_cache).
+COPY --from=node22 /usr/local/bin/node /usr/local/bin/node
+COPY --from=node22 /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=node22 /usr/local/include/node /usr/local/include/node
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+    && mkdir -p /usr/local/etc \
+    && printf 'cache=/app/data/npm-cache\n' > /usr/local/etc/npmrc \
+    && node --version && npm --version && npx --version
+ENV npm_config_cache=/app/data/npm-cache
 
 # Docker CLI (client only — daemon stays on the host via the
 # /var/run/docker.sock mount). The Debian `docker.io` package ships

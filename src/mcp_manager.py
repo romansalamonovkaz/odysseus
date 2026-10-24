@@ -18,10 +18,38 @@ from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
+# Fork 2026-10-24: a user stdio MCP server whose startup connect failed (e.g. a
+# cold `npx` download after a container recreate) gets these background retries:
+# (pause before the attempt, attempt timeout) in seconds.
+_MCP_RETRY_SCHEDULE: Tuple[Tuple[float, float], ...] = ((5.0, 45.0), (15.0, 90.0))
+
+
+def _describe_connect_error(error: BaseException) -> str:
+    """Readable cause of a connect failure.
+
+    The mcp/anyio transports raise ExceptionGroups whose str() is only
+    "unhandled errors in a TaskGroup (1 sub-exception)"; the leaves carry the
+    real cause (process exited, connection closed, ...).
+    """
+    if error is None:
+        return "Unknown error"
+    if isinstance(error, BaseExceptionGroup):
+        return "; ".join(_describe_group_leaf(sub) for sub in error.exceptions) or type(error).__name__
+    # A plain exception keeps its own message, as before.
+    return str(error) or type(error).__name__
+
+
+def _describe_group_leaf(error: BaseException) -> str:
+    if isinstance(error, BaseExceptionGroup):
+        return "; ".join(_describe_group_leaf(sub) for sub in error.exceptions) or type(error).__name__
+    text = str(error).strip()
+    return f"{type(error).__name__}: {text}" if text else type(error).__name__
+
+
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
     args = args or []
-    raw_error = str(error) if error else "Unknown error"
+    raw_error = _describe_connect_error(error) if error else "Unknown error"
     command_line = " ".join([command or "", *args]).strip()
     lower_command = command_line.lower()
 
@@ -230,6 +258,10 @@ class McpManager:
         url: Optional[str] = None,
     ) -> bool:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
+        if transport == "stdio":
+            # A manual connect/reconnect supersedes a pending background retry,
+            # so the retry cannot open a second session for the same server.
+            self._cancel_pending_retry(server_id)
         try:
             if transport == "stdio":
                 res = await self._connect_stdio(server_id, name, command, args or [], env or {})
@@ -244,7 +276,7 @@ class McpManager:
                 self._generation += 1
             return res
         except Exception as e:
-            logger.error(f"Failed to connect MCP server {name} ({server_id}): {e}")
+            logger.error(f"Failed to connect MCP server {name} ({server_id}): {_describe_connect_error(e)}")
             error_message = _format_mcp_connection_error(name, command or "", args or [], e)
             self._connections[server_id] = {"status": "error", "error": error_message, "name": name}
             self._generation += 1
@@ -489,6 +521,12 @@ class McpManager:
 
     async def disconnect_all(self):
         """Disconnect from all MCP servers."""
+        # Pending retries / background connects of servers that never connected
+        # are not in _sessions; cancel them too so none outlives shutdown.
+        for task in list(self._connect_tasks.values()):
+            if task is not None and not task.done():
+                task.cancel()
+        self._connect_tasks.clear()
         ids = list(self._sessions.keys())
         for sid in ids:
             await self.disconnect_server(sid)
@@ -513,8 +551,9 @@ class McpManager:
         args = json.loads(srv.args) if srv.args else []
         env = json.loads(srv.env) if srv.env else {}
 
+        ok = False
         try:
-            await asyncio.wait_for(
+            ok = await asyncio.wait_for(
                 self.connect_server(
                     server_id=srv.id,
                     name=srv.name,
@@ -533,6 +572,73 @@ class McpManager:
                 "error": f"Timed out after 20 seconds",
                 "name": srv.name,
             }
+
+        if srv.transport == "stdio" and ok is not True:
+            # Never awaited: startup must not wait for retries.
+            self._connect_tasks[srv.id] = asyncio.create_task(
+                self._retry_connect(srv.id, srv.name)
+            )
+
+    def _cancel_pending_retry(self, server_id: str) -> None:
+        task = self._connect_tasks.get(server_id)
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+        self._connect_tasks.pop(server_id, None)
+
+    async def _retry_connect(self, server_id: str, name: str) -> bool:
+        """Background retries for a stdio server whose startup connect failed.
+
+        Stops when the server is connected (by a retry or a manual reconnect),
+        disabled, or deleted. disconnect_server cancels this task through
+        _connect_tasks.
+        """
+        try:
+            for attempt, (pause, timeout) in enumerate(_MCP_RETRY_SCHEDULE, start=1):
+                await asyncio.sleep(pause)
+                if self._connections.get(server_id, {}).get("status") == "connected":
+                    return True
+                db = SessionLocal()
+                try:
+                    srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+                    if srv is None or not srv.is_enabled or srv.transport != "stdio":
+                        return False
+                    command = srv.command
+                    args = json.loads(srv.args) if srv.args else []
+                    env = json.loads(srv.env) if srv.env else {}
+                finally:
+                    db.close()
+                try:
+                    ok = await asyncio.wait_for(
+                        self.connect_server(
+                            server_id=server_id,
+                            name=name,
+                            transport="stdio",
+                            command=command,
+                            args=args,
+                            env=env,
+                        ),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    ok = False
+                    self._connections[server_id] = {
+                        "status": "timeout",
+                        "error": f"Timed out after {timeout:.0f} seconds (retry {attempt})",
+                        "name": name,
+                    }
+                if ok:
+                    logger.info("MCP retry %d connected: %s (%s)", attempt, name, server_id)
+                    return True
+                logger.warning(
+                    "MCP retry %d failed: %s (%s): %s",
+                    attempt, name, server_id,
+                    self._connections.get(server_id, {}).get("error"),
+                )
+            return False
+        finally:
+            if self._connect_tasks.get(server_id) is asyncio.current_task():
+                self._connect_tasks.pop(server_id, None)
 
     def _tool_schema(self, server_id: str, tool_name: str) -> Dict:
         for tool in self._tools.get(server_id) or []:
