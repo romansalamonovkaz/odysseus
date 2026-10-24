@@ -113,6 +113,15 @@ COPY --from=realesrgan-wheels /wheels/ /tmp/odysseus-wheels/
 RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
     && rm -rf /tmp/odysseus-wheels
 
+# Fork 2026-10-24: Debian's python3.13 used to arrive as a dependency of the
+# apt nodejs package. The hyperresearch MCP venv in /app/data/hyperresearch_venv
+# was created with /usr/bin/python3.13, so keep that interpreter explicitly now
+# that Node comes from the node22 stage. Late layer, so the pip layers above
+# stay cached.
+RUN apt-get update && apt-get install -y --no-install-recommends python3.13 \
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/bin/python3.13 --version
+
 # Copy app code
 COPY . .
 
