@@ -328,6 +328,8 @@ class McpManager:
                         identity_hints.append(v)
                 identity = ", ".join(identity_hints) if identity_hints else ""
 
+                if self._another_connect_won(server_id, name):
+                    return True  # finally closes our stack (registered stays False)
                 self._sessions[server_id] = session
                 self._stacks[server_id] = stack
                 self._tools[server_id] = tools
@@ -387,6 +389,8 @@ class McpManager:
                         "annotations": getattr(tool, 'annotations', None),
                     })
 
+                if self._another_connect_won(server_id, name):
+                    return True  # finally closes our stack (registered stays False)
                 self._sessions[server_id] = session
                 self._stacks[server_id] = stack
                 self._tools[server_id] = tools
@@ -470,6 +474,9 @@ class McpManager:
                     "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
                 })
 
+            if self._another_connect_won(server_id, name):
+                await stack.aclose()
+                return True
             self._sessions[server_id] = session
             self._stacks[server_id] = stack
             self._tools[server_id] = tools
@@ -589,6 +596,18 @@ class McpManager:
             server_id in self._sessions
             or self._connections.get(server_id, {}).get("status") == "connected"
         )
+
+    def _another_connect_won(self, server_id: str, name: str) -> bool:
+        # Fork 2026-10-24: two connects of one server can overlap (startup attempt
+        # or background retry vs. a manual Reconnect, each spawning its own npx).
+        # disconnect_server always drops the old stack first, so a stack that is
+        # already registered here belongs to a concurrent connect that finished
+        # first: keep it and let the caller close its own, instead of overwriting
+        # it and orphaning that session and its child process.
+        if server_id not in self._stacks:
+            return False
+        logger.info("MCP server %s (%s) already connected by a concurrent attempt; closing the duplicate", name, server_id)
+        return True
 
     def _cancel_pending_retry(self, server_id: str) -> None:
         task = self._connect_tasks.get(server_id)

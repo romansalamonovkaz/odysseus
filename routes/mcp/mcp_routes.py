@@ -573,6 +573,9 @@ def setup_mcp_routes(mcp_manager: McpManager):
             # Attempt to connect the MCP server now
             args = json.loads(srv.args) if srv.args else []
             env = json.loads(srv.env) if srv.env else {}
+            # Fork 2026-10-24: drop a session started without these tokens, otherwise
+            # connect_server keeps it and closes the new, authorized one.
+            await mcp_manager.disconnect_server(server_id)
             connected = await mcp_manager.connect_server(
                 server_id=server_id,
                 name=srv.name,

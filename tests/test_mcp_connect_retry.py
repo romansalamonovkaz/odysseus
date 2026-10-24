@@ -300,3 +300,100 @@ async def test_disconnect_all_waits_for_cancelled_connects(monkeypatch):
 
     assert retry.done()
     assert manager._connect_tasks == {}
+
+
+def _fake_mcp_stdio(monkeypatch, gates):
+    """Real _connect_stdio over a fake stdio_client/ClientSession. Connect #n
+    waits on gates[n] (if any) while opening; log records opened/closed n."""
+    import mcp
+    import mcp.client.stdio as stdio_mod
+
+    log = {"opened": [], "closed": []}
+
+    class _Client:
+        def __init__(self, _params):
+            log["opened"].append(len(log["opened"]) + 1)
+            self.n = log["opened"][-1]
+
+        async def __aenter__(self):
+            if self.n in gates:
+                await gates[self.n].wait()
+            return (self.n, self.n)
+
+        async def __aexit__(self, *_exc):
+            log["closed"].append(self.n)
+            return False
+
+    class _Session:
+        def __init__(self, read_stream, _write_stream):
+            self.n = read_stream
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def initialize(self):
+            pass
+
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+    monkeypatch.setattr(stdio_mod, "stdio_client", _Client)
+    monkeypatch.setattr(mcp, "ClientSession", _Session)
+    return log
+
+
+@pytest.mark.asyncio
+async def test_overlapping_connects_keep_one_session_and_close_the_other(monkeypatch):
+    manager = mm.McpManager()
+    gates = {1: asyncio.Event()}
+    log = _fake_mcp_stdio(monkeypatch, gates)
+
+    slow = asyncio.create_task(manager.connect_server("fc", "Firecrawl", "stdio", "npx", [], {}))
+    await asyncio.sleep(0.01)
+    assert await manager.connect_server("fc", "Firecrawl", "stdio", "npx", [], {}) is True
+    gates[1].set()
+    assert await slow is True
+
+    assert manager._sessions["fc"].n == 2
+    assert list(manager._stacks) == ["fc"]
+    assert log["closed"] == [1]
+    await manager.disconnect_all()
+    assert log["closed"] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_retry_racing_an_unfinished_manual_reconnect_orphans_no_session(monkeypatch, fast_retries):
+    """Review r2: startup attempt hangs; a manual Reconnect starts and is still
+    running when the startup attempt times out, so a retry is scheduled and
+    connects first. The manual connect must close its own session, not
+    overwrite the retry's and orphan it."""
+    real_wait_for = asyncio.wait_for
+
+    async def short_wait_for(awaitable, timeout):
+        return await real_wait_for(awaitable, timeout=min(timeout, 0.2))
+
+    monkeypatch.setattr(mm.asyncio, "wait_for", short_wait_for)
+    monkeypatch.setattr(mm, "SessionLocal", lambda: _FakeDB([_row()]))
+    manager = mm.McpManager()
+    gates = {1: asyncio.Event(), 2: asyncio.Event()}  # 1 never opens; 2 = manual, released later
+    log = _fake_mcp_stdio(monkeypatch, gates)
+
+    startup = asyncio.create_task(manager.connect_all_enabled())
+    await asyncio.sleep(0.05)
+    manual = asyncio.create_task(manager.connect_server("fc", "Firecrawl", "stdio", "npx", [], {}))
+    await startup  # times out with the manual connect still in flight → retry scheduled
+    await asyncio.sleep(0.1)  # the retry (connect #3) has connected
+    assert manager._sessions["fc"].n == 3
+    gates[2].set()
+    assert await manual is True
+
+    assert log["opened"] == [1, 2, 3]
+    assert manager._sessions["fc"].n == 3
+    assert list(manager._stacks) == ["fc"]
+    assert log["closed"] == [2]
+    assert manager._connections["fc"]["status"] == "connected"
+    await manager.disconnect_all()
+    assert log["closed"] == [2, 3]
