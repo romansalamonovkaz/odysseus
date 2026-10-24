@@ -1577,3 +1577,19 @@ def test_foreground_policy_still_strict_on_401(monkeypatch):
     chunks = _run_fallback(monkeypatch, per_model, fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES)
     assert any(c.startswith("event: error") for c in chunks), chunks
     assert not any('"hello"' in c for c in chunks), chunks
+
+
+@pytest.mark.parametrize("error", [
+    "Недостаточно средств. Требуется: 1.00 ₽, доступно: 0.94 ₽ (баланс: 0.94 ₽, "
+    "зарезервировано: 0.00 ₽). Пожалуйста, пополните баланс.",
+    {"status": 400, "message": "Недостаточно средств. Пожалуйста, пополните баланс."},
+    {"code": "INSUFFICIENT_BALANCE", "message": "balance too low"},
+])
+def test_provider_empty_balance_is_payment_required(error):
+    # polza.ai sends this inside a 200 stream with status 400; it must become
+    # 402 so foreground fallback moves to the same model on the next route.
+    assert llm_core._provider_stream_error_status(error) == 402
+
+
+def test_provider_plain_bad_request_text_stays_400():
+    assert llm_core._provider_stream_error_status("Неверный запрос: bad request") == 400

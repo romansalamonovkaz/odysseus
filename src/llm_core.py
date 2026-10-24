@@ -3656,6 +3656,27 @@ _SYMBOLIC_RATE_LIMIT_STATUSES = frozenset({
 })
 
 
+# Fork 2026-10-24: polza.ai reports an empty balance inside a 200 stream as
+# {"error": "Недостаточно средств. … пополните баланс.", "status": 400}. The
+# 400 is not about the request: the same model on the next paid route answers.
+_BALANCE_EXHAUSTED_MARKERS = (
+    "недостаточно средств",
+    "пополните баланс",
+    "insufficient balance",
+    "insufficient_balance",
+    "insufficient funds",
+)
+
+
+def _is_balance_exhausted_text(error) -> bool:
+    if isinstance(error, dict):
+        text = " ".join(str(error.get(key) or "") for key in ("type", "code", "message", "error"))
+    else:
+        text = str(error or "")
+    text = text.lower()
+    return any(marker in text for marker in _BALANCE_EXHAUSTED_MARKERS)
+
+
 def _provider_stream_error_status(error, *, default: int = 400) -> int:
     """Classify structured provider stream errors without making them eligible by default.
 
@@ -3664,6 +3685,9 @@ def _provider_stream_error_status(error, *, default: int = 400) -> int:
     availability evidence; only explicit transient/server markers become 5xx
     or rate-limit statuses.
     """
+
+    if _is_balance_exhausted_text(error):
+        return 402
 
     if isinstance(error, dict):
         # A structured numeric status is authoritative. Text heuristics are
