@@ -12,6 +12,7 @@ import src.llm_core as llm_core
 from src.foreground_model_routing import (
     BACKUP_ROUTE_EXTRA_STATUSES,
     FOREGROUND_AVAILABILITY_STATUSES,
+    MAX_FOREGROUND_FALLBACKS,
     ForegroundModelPolicy,
     build_foreground_model_candidates,
     build_foreground_route_descriptors,
@@ -19,6 +20,7 @@ from src.foreground_model_routing import (
     resolve_foreground_model_policy,
 )
 from tests.test_foreground_model_routing import _RouteRequest, _chat_stream_endpoint
+from tests.test_llm_core_fallback import _POLZA_EMPTY_BALANCE, _run_provider_stream
 
 POLZA = ("https://polza.ai/api/v1/chat/completions", "openai/gpt-6-sol", {"Authorization": "Bearer p"})
 AIT = ("https://api.aitunnel.ru/v1/chat/completions", "gpt-6-sol", {"Authorization": "Bearer a"})
@@ -220,3 +222,46 @@ async def test_chat_and_agent_routes_pass_backup_statuses(monkeypatch, mode, bac
     got_candidates, statuses = captured[mode]
     assert AIT in got_candidates
     assert {401, 403} <= set(statuses)
+
+
+def test_total_fallbacks_stay_capped_and_backup_wins(backups):
+    many = tuple((f"https://list{i}.example/v1", f"m{i}", {}) for i in range(MAX_FOREGROUND_FALLBACKS))
+    routes = build_foreground_routes(*POLZA, policy=_policy(
+        fallback_candidates=many, fallback_descriptors=tuple(_desc(f"l{i}") for i in range(len(many)))))
+    assert len(routes.candidates) == 1 + MAX_FOREGROUND_FALLBACKS
+    assert len(routes.descriptors) == len(routes.candidates)
+    assert routes.candidates[1] == AIT
+
+
+def test_parsed_backup_ids_are_deduped_and_capped(monkeypatch):
+    ids = ["ait", "ait"] + [f"b{i}" for i in range(MAX_FOREGROUND_FALLBACKS + 5)]
+    monkeypatch.setattr(fmr, "_load_policy_preferences", lambda owner=None: {
+        "foreground_fallback_enabled": True, "foreground_route_backups": {"polza": ids}})
+    (primary, parsed), = resolve_foreground_model_policy("admin").route_backups
+    assert parsed[0] == "ait" and parsed.count("ait") == 1 and len(parsed) == MAX_FOREGROUND_FALLBACKS
+
+
+def test_polza_in_stream_balance_error_hands_turn_to_aitunnel(backups, monkeypatch):
+    """polza's real adapter output for its 200-stream balance event (status 400 → 402) reaches the backup."""
+    polza_chunks = _run_provider_stream(
+        monkeypatch, POLZA[0], ["data: " + json.dumps({"error": _POLZA_EMPTY_BALANCE, "status": 400})])
+
+    async def fake_stream_llm(url, model, messages, headers=None, **kwargs):
+        if url == POLZA[0]:
+            for c in polza_chunks:
+                yield c
+            return
+        yield 'data: {"delta": "Париж"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(llm_core, "stream_llm", fake_stream_llm)
+    routes = build_foreground_routes(*POLZA, policy=_policy())
+    for statuses in (routes.fallback_statuses, FOREGROUND_AVAILABILITY_STATUSES):
+        async def run():
+            return [c async for c in llm_core.stream_llm_with_fallback(
+                routes.candidates, [{"role": "user", "content": "?"}],
+                fallback_statuses=statuses, fallback_on_empty=False,
+                candidate_route_descriptors=routes.descriptors,
+            )]
+        out = "".join(asyncio.run(run()))
+        assert out.count("Париж") == 1, statuses

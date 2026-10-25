@@ -69,7 +69,9 @@ def _parse_route_backups(raw) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
     for primary, backups in raw.items():
         if not isinstance(primary, str) or not primary or not isinstance(backups, list):
             continue
-        ids = tuple(b for b in backups if isinstance(b, str) and b and b != primary)
+        ids = tuple(dict.fromkeys(
+            b for b in backups if isinstance(b, str) and b and b != primary
+        ))[:MAX_FOREGROUND_FALLBACKS]
         if ids:
             out.append((primary, ids))
     return tuple(out)
@@ -231,16 +233,14 @@ def _same_model_backup_routes(policy, primary_endpoint_id, model, owner) -> list
         return []
     backup_ids = dict(policy.route_backups).get(primary_endpoint_id, ())
     identity = _model_identity(model)
-    allowed_identities = (
-        None if policy.allowed_models is None
-        else {_model_identity(m) for m in policy.allowed_models}
-    )
+    if policy.allowed_models is not None and identity not in {
+        _model_identity(m) for m in policy.allowed_models
+    }:
+        return []
     routes = []
     for backup_id in backup_ids:
         backup_model = _backup_model_for(backup_id, identity)
         if not backup_model:
-            continue
-        if allowed_identities is not None and identity not in allowed_identities:
             continue
         routes.extend(resolve_fallback_entries_with_descriptors(
             [{"endpoint_id": backup_id, "model": backup_model}],
@@ -281,12 +281,16 @@ def _build_routes(
         for candidate, descriptor in _same_model_backup_routes(policy, primary_id, model, owner):
             if candidate in candidates:
                 continue
+            if len(candidates) > MAX_FOREGROUND_FALLBACKS:
+                break
             candidates.append(candidate)
             descriptors.append(dict(descriptor))
             statuses = statuses | BACKUP_ROUTE_EXTRA_STATUSES
     for index, candidate in enumerate(policy.fallback_candidates):
         if candidate in candidates:
             continue
+        if len(candidates) > MAX_FOREGROUND_FALLBACKS:
+            break  # one cap for backups + list together; backups come first and win
         candidates.append(candidate)
         if with_descriptors:
             descriptors.append(
