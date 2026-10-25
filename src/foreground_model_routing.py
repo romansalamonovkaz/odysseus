@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Collection, Dict, FrozenSet, Optional, Tuple
 
 from src.endpoint_resolver import (
+    _endpoint_enabled_models,
     endpoint_cost_tracked,
     resolve_fallback_entries,
     resolve_fallback_entries_with_descriptors,
@@ -23,6 +24,14 @@ FOREGROUND_AVAILABILITY_STATUSES: FrozenSet[int] = frozenset({
 })
 MAX_FOREGROUND_FALLBACKS = 10
 
+# Fork 2026-10-25: explicit same-model backup routes. ``{"<primary endpoint_id>": ["<backup endpoint_id>", ...]}``
+# in the owner's preferences makes the SAME model on a backup endpoint (e.g. polza.ai → AITUNNEL) the first
+# fallback, before ``foreground_model_fallbacks``. Only explicitly mapped endpoints are used, never "any endpoint
+# that lists the model" (that could route to a marked-up gateway). 401/403 (key blocked, model not allowed for
+# this key) are a route problem when the same model has another route, so they become eligible then.
+FOREGROUND_ROUTE_BACKUPS_KEY = "foreground_route_backups"
+BACKUP_ROUTE_EXTRA_STATUSES: FrozenSet[int] = frozenset({401, 403})
+
 
 @dataclass(frozen=True)
 class ForegroundModelPolicy:
@@ -33,6 +42,37 @@ class ForegroundModelPolicy:
     fallback_descriptors: Tuple[dict, ...] = ()
     eligible_statuses: FrozenSet[int] = FOREGROUND_AVAILABILITY_STATUSES
     fallback_on_empty: bool = False
+    route_backups: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+    allowed_models: Optional[FrozenSet[str]] = None
+
+
+@dataclass(frozen=True)
+class ForegroundRoutes:
+    """Ordered foreground candidates, their parallel descriptors, and the statuses that may advance."""
+
+    candidates: list
+    descriptors: list
+    fallback_statuses: FrozenSet[int]
+
+
+def _model_identity(model: Optional[str]) -> str:
+    """Provider-neutral model id: lowercase, one leading ``vendor/`` dropped (openai/gpt-6-sol ≡ gpt-6-sol)."""
+
+    m = (model or "").strip().lower()
+    return m.split("/", 1)[1] if "/" in m else m
+
+
+def _parse_route_backups(raw) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+    if not isinstance(raw, dict):
+        return ()
+    out = []
+    for primary, backups in raw.items():
+        if not isinstance(primary, str) or not primary or not isinstance(backups, list):
+            continue
+        ids = tuple(b for b in backups if isinstance(b, str) and b and b != primary)
+        if ids:
+            out.append((primary, ids))
+    return tuple(out)
 
 
 def _load_policy_preferences(owner: Optional[str]) -> dict:
@@ -76,12 +116,19 @@ def resolve_foreground_model_policy(
 
     if prefs.get(FOREGROUND_FALLBACK_ENABLED_KEY) is not True:
         return ForegroundModelPolicy()
+    # Fork 2026-10-25: same-model backup routes ride on the same explicit consent.
+    route_backups = _parse_route_backups(prefs.get(FOREGROUND_ROUTE_BACKUPS_KEY))
+    allowed = frozenset(allowed_models) if allowed_models is not None else None
+
+    def _no_list_policy() -> ForegroundModelPolicy:
+        if not route_backups:
+            return ForegroundModelPolicy()
+        return ForegroundModelPolicy(enabled=True, route_backups=route_backups, allowed_models=allowed)
 
     entries = prefs.get(FOREGROUND_FALLBACK_LIST_KEY)
     if not isinstance(entries, list) or not entries:
-        return ForegroundModelPolicy()
+        return _no_list_policy()
     if allowed_models is not None:
-        allowed = frozenset(allowed_models)
         entries = [
             entry for entry in entries
             if (
@@ -91,7 +138,7 @@ def resolve_foreground_model_policy(
             )
         ]
         if not entries:
-            return ForegroundModelPolicy()
+            return _no_list_policy()
     entries = entries[:MAX_FOREGROUND_FALLBACKS]
 
     if resolve_fallback_entries is not _DEFAULT_FALLBACK_ENTRY_RESOLVER:
@@ -137,7 +184,7 @@ def resolve_foreground_model_policy(
         )
     candidates = [candidate for candidate, _descriptor in resolved_routes]
     if not candidates:
-        return ForegroundModelPolicy()
+        return _no_list_policy()
 
     return ForegroundModelPolicy(
         enabled=True,
@@ -145,6 +192,8 @@ def resolve_foreground_model_policy(
         fallback_descriptors=tuple(
             dict(descriptor) for _candidate, descriptor in resolved_routes
         ),
+        route_backups=route_backups,
+        allowed_models=allowed,
     )
 
 
@@ -154,22 +203,136 @@ def resolve_foreground_fallback_candidates(owner: Optional[str] = None) -> list:
     return list(resolve_foreground_model_policy(owner).fallback_candidates)
 
 
+def _backup_model_for(endpoint_id: str, identity: str) -> Optional[str]:
+    """The backup endpoint's own id for ``identity`` (enabled, not hidden), or None."""
+
+    from core.database import SessionLocal, ModelEndpoint
+
+    db = SessionLocal()
+    try:
+        ep = db.query(ModelEndpoint).filter(
+            ModelEndpoint.id == endpoint_id,
+            ModelEndpoint.is_enabled == True,
+        ).first()
+        if not ep:
+            return None
+        for candidate in _endpoint_enabled_models(ep):
+            if _model_identity(candidate) == identity:
+                return candidate
+        return None
+    finally:
+        db.close()
+
+
+def _same_model_backup_routes(policy, primary_endpoint_id, model, owner) -> list:
+    """(candidate, descriptor) pairs for the same model on the owner's mapped backup endpoints."""
+
+    if not policy.route_backups or not primary_endpoint_id:
+        return []
+    backup_ids = dict(policy.route_backups).get(primary_endpoint_id, ())
+    identity = _model_identity(model)
+    allowed_identities = (
+        None if policy.allowed_models is None
+        else {_model_identity(m) for m in policy.allowed_models}
+    )
+    routes = []
+    for backup_id in backup_ids:
+        backup_model = _backup_model_for(backup_id, identity)
+        if not backup_model:
+            continue
+        if allowed_identities is not None and identity not in allowed_identities:
+            continue
+        routes.extend(resolve_fallback_entries_with_descriptors(
+            [{"endpoint_id": backup_id, "model": backup_model}],
+            owner=owner,
+            require_exact_model=True,
+        ))
+    return routes
+
+
+def _selected_descriptor(endpoint_url, model, headers, owner, selected_endpoint_id):
+    selected = None
+    if selected_endpoint_id:
+        selected = resolve_route_descriptor_by_id(
+            selected_endpoint_id,
+            endpoint_url,
+            model,
+            headers or {},
+            owner=owner,
+        )
+    if selected is None:
+        selected = resolve_route_descriptor(endpoint_url, model, headers or {}, owner=owner)
+    return selected
+
+
+def _build_routes(
+    endpoint_url, model, headers, owner, policy, selected_endpoint_id, *, with_descriptors
+) -> ForegroundRoutes:
+    policy = policy or resolve_foreground_model_policy(owner)
+    primary = (endpoint_url, model, headers or {})
+    selected = None
+    if with_descriptors or (policy.enabled and policy.route_backups):
+        selected = _selected_descriptor(endpoint_url, model, headers, owner, selected_endpoint_id)
+    candidates = [primary]
+    descriptors = [selected]
+    statuses = policy.eligible_statuses
+    if policy.enabled:
+        primary_id = (selected or {}).get("endpoint_id") or selected_endpoint_id
+        for candidate, descriptor in _same_model_backup_routes(policy, primary_id, model, owner):
+            if candidate in candidates:
+                continue
+            candidates.append(candidate)
+            descriptors.append(dict(descriptor))
+            statuses = statuses | BACKUP_ROUTE_EXTRA_STATUSES
+    for index, candidate in enumerate(policy.fallback_candidates):
+        if candidate in candidates:
+            continue
+        candidates.append(candidate)
+        if with_descriptors:
+            descriptors.append(
+                dict(policy.fallback_descriptors[index])
+                if index < len(policy.fallback_descriptors)
+                else {
+                    "endpoint_id": None,
+                    "endpoint_label": "Fallback route",
+                    "endpoint_cost_tracked": endpoint_cost_tracked(candidate[0]),
+                }
+            )
+    return ForegroundRoutes(
+        candidates=candidates,
+        descriptors=descriptors if with_descriptors else [],
+        fallback_statuses=frozenset(statuses),
+    )
+
+
+def build_foreground_routes(
+    endpoint_url: str,
+    model: str,
+    headers: Optional[Dict[str, Any]] = None,
+    owner: Optional[str] = None,
+    policy: Optional[ForegroundModelPolicy] = None,
+    selected_endpoint_id: Optional[str] = None,
+) -> ForegroundRoutes:
+    """Candidates, parallel descriptors and eligible statuses for one foreground request (one source of truth)."""
+
+    return _build_routes(
+        endpoint_url, model, headers, owner, policy, selected_endpoint_id, with_descriptors=True
+    )
+
+
 def build_foreground_model_candidates(
     endpoint_url: str,
     model: str,
     headers: Optional[Dict[str, Any]] = None,
     owner: Optional[str] = None,
     policy: Optional[ForegroundModelPolicy] = None,
+    selected_endpoint_id: Optional[str] = None,
 ) -> list:
     """Build the ordered candidate list for a foreground request."""
 
-    policy = policy or resolve_foreground_model_policy(owner)
-    primary = (endpoint_url, model, headers or {})
-    candidates = [primary]
-    for candidate in policy.fallback_candidates:
-        if candidate not in candidates:
-            candidates.append(candidate)
-    return candidates
+    return _build_routes(
+        endpoint_url, model, headers, owner, policy, selected_endpoint_id, with_descriptors=False
+    ).candidates
 
 
 def build_foreground_route_descriptors(
@@ -182,27 +345,6 @@ def build_foreground_route_descriptors(
 ) -> list:
     """Build safe route metadata parallel to foreground candidates."""
 
-    policy = policy or resolve_foreground_model_policy(owner)
-    selected = None
-    if selected_endpoint_id:
-        selected = resolve_route_descriptor_by_id(
-            selected_endpoint_id,
-            endpoint_url,
-            model,
-            headers or {},
-            owner=owner,
-        )
-    if selected is None:
-        selected = resolve_route_descriptor(endpoint_url, model, headers or {}, owner=owner)
-    primary = (endpoint_url, model, headers or {})
-    candidates = [primary]
-    descriptors = [selected]
-    for candidate, descriptor in zip(
-        policy.fallback_candidates,
-        policy.fallback_descriptors,
-    ):
-        if candidate in candidates:
-            continue
-        candidates.append(candidate)
-        descriptors.append(dict(descriptor))
-    return descriptors
+    return build_foreground_routes(
+        endpoint_url, model, headers, owner=owner, policy=policy, selected_endpoint_id=selected_endpoint_id
+    ).descriptors

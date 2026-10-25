@@ -33,8 +33,7 @@ from src.context_compactor import (
 from src.chat_helpers import coerce_message_and_session
 from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
 from src.foreground_model_routing import (
-    build_foreground_model_candidates,
-    build_foreground_route_descriptors,
+    build_foreground_routes,
     resolve_foreground_model_policy,
 )
 from src.session_search import search_session_messages
@@ -874,14 +873,9 @@ def setup_chat_routes(
             except Exception as e:
                 logger.error(f"Research failed: {e}")
 
-        foreground_candidates = build_foreground_model_candidates(
-            sess.endpoint_url,
-            sess.model,
-            sess.headers,
-            owner=owner,
-            policy=foreground_policy,
-        )
-        route_descriptors = build_foreground_route_descriptors(
+        # Fork 2026-10-25: one builder → candidates, descriptors and statuses stay in step
+        # (same-model backup routes add 401/403 to the eligible statuses).
+        foreground_routes = build_foreground_routes(
             sess.endpoint_url,
             sess.model,
             sess.headers,
@@ -889,6 +883,8 @@ def setup_chat_routes(
             policy=foreground_policy,
             selected_endpoint_id=chat_request.selected_endpoint_id,
         )
+        foreground_candidates = foreground_routes.candidates
+        route_descriptors = foreground_routes.descriptors
         candidate_request_factory = None
         selected_context_length = getattr(ctx, "context_length", 0)
         candidate_request_state = {
@@ -909,7 +905,7 @@ def setup_chat_routes(
         reply, actual_candidate, actual_model = await llm_call_async_with_route_fallback(
             foreground_candidates,
             request_messages,
-            fallback_statuses=foreground_policy.eligible_statuses,
+            fallback_statuses=foreground_routes.fallback_statuses,
             candidate_request_factory=candidate_request_factory,
             temperature=ctx.preset.temperature,
             max_tokens=ctx.preset.max_tokens,
@@ -1872,14 +1868,8 @@ def setup_chat_routes(
             # Foreground Chat and Agent requests share one explicit owner-aware
             # policy. Strict mode is the default; legacy values are unrelated.
             _foreground_policy = foreground_policy
-            _foreground_candidates = build_foreground_model_candidates(
-                sess.endpoint_url,
-                sess.model,
-                sess.headers,
-                owner=_user,
-                policy=_foreground_policy,
-            )
-            _foreground_route_descriptors = build_foreground_route_descriptors(
+            # Fork 2026-10-25: one builder for candidates, descriptors and eligible statuses.
+            _foreground_routes = build_foreground_routes(
                 sess.endpoint_url,
                 sess.model,
                 sess.headers,
@@ -1887,6 +1877,8 @@ def setup_chat_routes(
                 policy=_foreground_policy,
                 selected_endpoint_id=selected_endpoint_id,
             )
+            _foreground_candidates = _foreground_routes.candidates
+            _foreground_route_descriptors = _foreground_routes.descriptors
             _chat_request_factory = None
             _selected_context_length = getattr(ctx, "context_length", 0)
             _chat_request_state = {
@@ -2046,7 +2038,7 @@ def setup_chat_routes(
                         prompt_type=preset_id,
                         tools=None,
                         session_id=session,
-                        fallback_statuses=_foreground_policy.eligible_statuses,
+                        fallback_statuses=_foreground_routes.fallback_statuses,
                         fallback_on_empty=_foreground_policy.fallback_on_empty,
                         candidate_request_factory=_chat_request_factory,
                         candidate_route_descriptors=_foreground_route_descriptors,
@@ -2421,7 +2413,7 @@ def setup_chat_routes(
                         owner=_user,
                         fallbacks=_foreground_candidates[1:],
                         route_descriptors=_foreground_route_descriptors,
-                        fallback_statuses=_foreground_policy.eligible_statuses,
+                        fallback_statuses=_foreground_routes.fallback_statuses,
                         fallback_on_empty=_foreground_policy.fallback_on_empty,
                         plan_mode=plan_mode,
                         approved_plan=approved_plan or None,

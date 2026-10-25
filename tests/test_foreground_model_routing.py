@@ -1730,16 +1730,21 @@ async def test_chat_stream_threads_form_endpoint_id_to_descriptor_builder(monkey
     seen = []
 
     def fake_descriptors(*args, selected_endpoint_id=None, **kwargs):
+        # Fork 2026-10-25: chat routes build candidates, descriptors and statuses in one call.
         seen.append(selected_endpoint_id)
-        return [{
-            "endpoint_id": selected_endpoint_id,
-            "endpoint_label": "Selected endpoint",
-            "endpoint_cost_tracked": True,
-        }]
+        return foreground_model_routing.ForegroundRoutes(
+            candidates=[(args[0], args[1], args[2] or {})],
+            descriptors=[{
+                "endpoint_id": selected_endpoint_id,
+                "endpoint_label": "Selected endpoint",
+                "endpoint_cost_tracked": True,
+            }],
+            fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        )
 
     monkeypatch.setattr(
         chat_routes,
-        "build_foreground_route_descriptors",
+        "build_foreground_routes",
         fake_descriptors,
     )
     request = _RouteRequest("chat")
@@ -1759,12 +1764,17 @@ async def test_nonstream_chat_threads_request_endpoint_id_to_descriptor_builder(
     seen = []
 
     def fake_descriptors(*args, selected_endpoint_id=None, **kwargs):
+        # Fork 2026-10-25: chat routes build candidates, descriptors and statuses in one call.
         seen.append(selected_endpoint_id)
-        return [{
-            "endpoint_id": selected_endpoint_id,
-            "endpoint_label": "Selected endpoint",
-            "endpoint_cost_tracked": True,
-        }]
+        return foreground_model_routing.ForegroundRoutes(
+            candidates=[(args[0], args[1], args[2] or {})],
+            descriptors=[{
+                "endpoint_id": selected_endpoint_id,
+                "endpoint_label": "Selected endpoint",
+                "endpoint_cost_tracked": True,
+            }],
+            fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
+        )
 
     async def fake_call(url, model, messages, **kwargs):
         return "selected answer"
@@ -1776,7 +1786,7 @@ async def test_nonstream_chat_threads_request_endpoint_id_to_descriptor_builder(
     )
     monkeypatch.setattr(
         chat_routes,
-        "build_foreground_route_descriptors",
+        "build_foreground_routes",
         fake_descriptors,
     )
     monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
